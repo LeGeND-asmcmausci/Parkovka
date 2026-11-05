@@ -1,0 +1,600 @@
+/// Prisma Schema — Smart Parking Management System
+/// 
+/// @author Principal Backend Engineer
+/// @version 0.1.0
+
+generator client {
+  provider      = "postgresql"
+  binaryTargets = ["node@20"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// --------------------------------------------------------
+// Auth & Identity
+// --------------------------------------------------------
+
+model User {
+  id           String     @id @default(uuid())
+  name         String?
+  email        String     @unique
+  passwordHash String
+  role         Role       @default(USER)
+  status       UserStatus @default(ACTIVE)
+  phone        String?
+  licensePlate String?
+  profileImage String?
+  lastLoginAt  DateTime?  @default(now())
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  refreshTokens RefreshToken[]
+
+  // Relations
+  vehicles        Vehicle[]
+  reservations    Reservation[]
+  parkingSessions ParkingSession[]
+  notifications   Notification[]
+  activityLogs    ActivityLog[]
+  supportTickets  SupportTicket[]
+  QrCodeTicket    QrCodeTicket[]
+  Payment         Payment[]
+  GuardAssignment GuardAssignment[]
+  IncidentReport  IncidentReport[]
+}
+
+enum Role {
+  ADMIN
+  GUARD
+  USER
+}
+
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+  SUSPENDED
+}
+
+// --------------------------------------------------------
+// Vehicles
+// --------------------------------------------------------
+
+model Vehicle {
+  id          String   @id @default(uuid())
+  user        User?    @relation(fields: [userId], references: [id])
+  userId      String?  @unique // if linked to a user
+  plateNumber String   @unique
+  plateRegion String? // e.g., "Tashkent", "Samarkand"
+  vehicleType String?
+  brand       String?
+  model       String?
+  color       String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relations
+  parkingSessions ParkingSession[]
+}
+
+// --------------------------------------------------------
+// Parking Facilities
+// --------------------------------------------------------
+
+model ParkingFacility {
+  id          String         @id @default(uuid())
+  name        String
+  description String?
+  address     String
+  city        String         @default("Tashkent")
+  country     String         @default("Uzbekistan")
+  latitude    Decimal // for map integration
+  longitude   Decimal // for map integration
+  totalSpaces Int
+  covered     Boolean        @default(false)
+  status      FacilityStatus @default(ACTIVE)
+  hourlyRate  Int // in UZS, default hourly rate
+  dailyRate   Int // in UZS, default daily rate
+  currency    String         @default("UZS")
+  timezone    String         @default("Asia/Tashkent")
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  // Relations
+  floors          ParkingFloor[]
+  pricingRules    PricingRule[]
+  ParkingSpace    ParkingSpace[]
+  Reservation     Reservation[]
+  ParkingSession  ParkingSession[]
+  GuardAssignment GuardAssignment[]
+  Camera          Camera[]
+  IncidentReport  IncidentReport[]
+}
+
+enum FacilityStatus {
+  ACTIVE
+  INACTIVE
+  MAINTENANCE
+}
+
+// --------------------------------------------------------
+// Parking Floors
+// --------------------------------------------------------
+
+model ParkingFloor {
+  id          String          @id @default(uuid())
+  facilityId  String
+  facility    ParkingFacility @relation(fields: [facilityId], references: [id])
+  name        String
+  level       Int
+  totalSpaces Int
+  floorName   String // e.g., "Ground", "Level 1", "Basement"
+  status      FacilityStatus  @default(ACTIVE)
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+
+  // Relations
+  zones  ParkingZone[]
+  spaces ParkingSpace[]
+}
+
+model ParkingZone {
+  id          String         @id @default(uuid())
+  floorId     String
+  floor       ParkingFloor   @relation(fields: [floorId], references: [id])
+  name        String
+  zoneCode    String // e.g., "A", "B", "VIP", "EV"
+  zoneType    String // e.g., "regular", "EV", "VIP", "disabled"
+  totalSpaces Int
+  covered     Boolean        @default(false)
+  status      FacilityStatus @default(ACTIVE)
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  // Relations
+  spaces      ParkingSpace[]
+  PricingRule PricingRule[]
+}
+
+model ParkingSpace {
+  id              String          @id @default(uuid())
+  zoneId          String? // nullable for backward compat / ground-level
+  zone            ParkingZone?    @relation(fields: [zoneId], references: [id])
+  floorId         String
+  floor           ParkingFloor    @relation(fields: [floorId], references: [id])
+  facilityId      String
+  facility        ParkingFacility @relation(fields: [facilityId], references: [id])
+  spaceNumber     String
+  level           Int
+  zoneName        String
+  spaceType       String          @default("regular") // regular, disabled, EV, VIP
+  status          SpaceStatus     @default(AVAILABLE)
+  pricePerHour    Int // zone-specific hourly price in UZS
+  pricePerDay     Int // zone-specific daily price in UZS
+  maxStayDuration Int // in minutes, 0 = no limit
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  // Relations
+  parkingSessions ParkingSession[]
+  reservations    Reservation[]
+}
+
+enum SpaceStatus {
+  AVAILABLE
+  RESERVED
+  OCCUPIED
+  MAINTENANCE
+  RESERVED_HELD // temporarily held for walk-in
+}
+
+// --------------------------------------------------------
+// Reservations
+// --------------------------------------------------------
+
+model Reservation {
+  id         String          @id @default(uuid())
+  userId     String
+  user       User            @relation(fields: [userId], references: [id])
+  spaceId    String
+  space      ParkingSpace    @relation(fields: [spaceId], references: [id])
+  facilityId String
+  facility   ParkingFacility @relation(fields: [facilityId], references: [id])
+
+  // Reservation details
+  startTime     DateTime
+  endTime       DateTime
+  reservedAt    DateTime          @default(now())
+  status        ReservationStatus @default(CONFIRMED)
+  paymentStatus PaymentStatus     @default(PENDING)
+  priceCents    Int // total price in integer UZS cents (avoid float)
+  currency      String            @default("UZS")
+
+  // Metadata
+  cancellationReason String?
+  canceledAt         DateTime?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+  Payment            Payment[]
+
+  // Unique constraint: one active reservation per space
+  @@unique([spaceId, status]) // prevent overlapping at DB level via application logic
+  // Indexes
+  @@index([userId])
+  @@index([spaceId])
+  @@index([status])
+}
+
+enum ReservationStatus {
+  CONFIRMED
+  CANCELLED
+  EXPIRED
+  COMPLETED
+}
+
+enum PaymentStatus {
+  PENDING
+  COMPLETED
+  FAILED
+  REFUNDED
+}
+
+// --------------------------------------------------------
+// Parking Sessions (walk-in)
+// --------------------------------------------------------
+
+model ParkingSession {
+  id         String          @id @default(uuid())
+  userId     String? // nullable for guests
+  user       User?           @relation(fields: [userId], references: [id])
+  vehicleId  String
+  vehicle    Vehicle         @relation(fields: [vehicleId], references: [id])
+  spaceId    String
+  space      ParkingSpace    @relation(fields: [spaceId], references: [id])
+  facilityId String
+  facility   ParkingFacility @relation(fields: [facilityId], references: [id])
+
+  // Session timing
+  entryTime       DateTime
+  expectedExit    DateTime? // calculated based on pricing
+  actualExitTime  DateTime? // set when guard confirms exit
+  durationMinutes Int? // calculated at exit
+
+  // Pricing
+  basePriceCents  Int // in integer UZS
+  finalPriceCents Int // final price after calculations
+  currency        String @default("UZS")
+
+  // Status
+  status       SessionStatus @default(ACTIVE)
+  qrCodeTicket QrCodeTicket? // optional: generated at entry
+
+  // Metadata
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+  Payment          Payment?
+  PlateRecognition PlateRecognition[]
+}
+
+enum SessionStatus {
+  ACTIVE
+  COMPLETED
+  CANCELLED
+  EXPIRED
+}
+
+// --------------------------------------------------------
+// QR Code Tickets
+// --------------------------------------------------------
+
+model QrCodeTicket {
+  id               String          @id @default(uuid())
+  userId           String? // optional for guest tickets
+  user             User?           @relation(fields: [userId], references: [id])
+  parkingSessionId String?         @unique
+  parkingSession   ParkingSession? @relation(fields: [parkingSessionId], references: [id])
+  qrToken          String          @unique // cryptographically secure random token
+  qrTokenHash      String // stored hash for comparison
+  purpose          String // "entry", "exit", "reservation"
+  status           QrStatus        @default(ACTIVE)
+  expiresAt        DateTime
+  usedAt           DateTime?
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+
+  // Constraints
+  @@unique([qrToken, status])
+}
+
+enum QrStatus {
+  ACTIVE
+  USED
+  EXPIRED
+  REVOKED
+}
+
+// --------------------------------------------------------
+// Payments
+// --------------------------------------------------------
+
+model Payment {
+  id               String          @id @default(uuid())
+  userId           String? // nullable for guest/cash payments
+  user             User?           @relation(fields: [userId], references: [id])
+  parkingSessionId String?         @unique // for walk-in sessions
+  parkingSession   ParkingSession? @relation(fields: [parkingSessionId], references: [id])
+  reservationId    String? // for advance reservations
+  reservation      Reservation?    @relation(fields: [reservationId], references: [id])
+
+  // Payment details
+  amountCents   Int // amount in integer UZS (avoid float)
+  currency      String        @default("UZS")
+  paymentMethod PaymentMethod
+  status        PaymentStatus @default(PENDING)
+  providerTxId  String? // transaction ID from payment provider
+  provider      String? // "click", "payme", "cash"
+  description   String?
+  receiptUrl    String?
+  failureReason String?
+  failedAt      DateTime?
+
+  // Lifecycle
+  paidAt     DateTime?
+  refundedAt DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+}
+
+enum PaymentMethod {
+  CLICK
+  PAYME
+  CASH
+}
+
+// --------------------------------------------------------
+// Pricing Rules
+// --------------------------------------------------------
+
+model PricingRule {
+  id                    String          @id @default(uuid())
+  facilityId            String
+  facility              ParkingFacility @relation(fields: [facilityId], references: [id])
+  zoneId                String? // nullable = facility-wide rule
+  zone                  ParkingZone?    @relation(fields: [zoneId], references: [id])
+  ruleType              PricingRuleType
+  name                  String
+  description           String?
+  // Pricing values (in integer UZS)
+  hourlyRate            Int // per hour, 0 = use facility default
+  dailyRate             Int // max daily, 0 = use facility default
+  fixedReservationPrice Int // fixed price for advance reservation, 0 = calculate
+  gracePeriodMinutes    Int // grace period before charging
+  maxDailyRate          Int // maximum charge per day, 0 = no limit
+  peakMultiplier        Decimal // e.g., 1.5 for peak hours, default 1.0
+  minChargeCents        Int // minimum charge, even if < hourly
+  activeFrom            DateTime?
+  activeUntil           DateTime?
+  isActive              Boolean         @default(true)
+  createdAt             DateTime        @default(now())
+  updatedAt             DateTime        @updatedAt
+
+  // Constraints
+  @@unique([facilityId, zoneId, ruleType, isActive])
+}
+
+enum PricingRuleType {
+  HOURLY
+  DAILY
+  FIXED_RESERVATION
+  PEAK_HOUR
+}
+
+// --------------------------------------------------------
+// Guard Assignments
+// --------------------------------------------------------
+
+model GuardAssignment {
+  id         String           @id @default(uuid())
+  guardId    String
+  guard      User             @relation(fields: [guardId], references: [id])
+  facilityId String
+  facility   ParkingFacility  @relation(fields: [facilityId], references: [id])
+  assignedAt DateTime         @default(now())
+  assignedBy String? // admin who assigned
+  isPrimary  Boolean          @default(true) // primary guard vs secondary
+  status     AssignmentStatus @default(ACTIVE)
+
+  // Constraints
+  @@unique([guardId, facilityId])
+}
+
+enum AssignmentStatus {
+  ACTIVE
+  INACTIVE
+  REMOVED
+}
+
+// --------------------------------------------------------
+// Cameras / ALPR
+// --------------------------------------------------------
+
+model Camera {
+  id                  String             @id @default(uuid())
+  facilityId          String // nullable for standalone/entry-exit cameras
+  facility            ParkingFacility?   @relation(fields: [facilityId], references: [id])
+  name                String
+  rtspUrl             String? // never exposed to frontend
+  type                String // "entry", "exit", "internal", "perimeter"
+  status              CameraStatus       @default(OFFLINE)
+  confidenceThreshold Decimal            @default(0.7) // 0.0 - 1.0
+  isActive            Boolean            @default(true)
+  lastSeenAt          DateTime?
+  createdAt           DateTime           @default(now())
+  updatedAt           DateTime           @updatedAt
+  CameraEvent         CameraEvent[]
+  PlateRecognition    PlateRecognition[]
+}
+
+enum CameraStatus {
+  ONLINE
+  OFFLINE
+  MAINTENANCE
+  ERROR
+}
+
+model CameraEvent {
+  id             String   @id @default(uuid())
+  cameraId       String
+  camera         Camera   @relation(fields: [cameraId], references: [id])
+  eventType      String // "entry", "exit", "violation", "recognition"
+  plateNumber    String?
+  confidence     Decimal // 0.0 - 1.0
+  imagePath      String? // path to captured frame
+  recognizedAt   DateTime @default(now())
+  guardConfirmed Boolean  @default(false)
+  notes          String?
+  createdAt      DateTime @default(now())
+
+  // Indexes
+  @@index([cameraId])
+}
+
+model PlateRecognition {
+  id           String          @id @default(uuid())
+  cameraId     String
+  camera       Camera          @relation(fields: [cameraId], references: [id])
+  plateNumber  String          @unique // actual plate seen
+  confidence   Decimal // recognition confidence
+  recognizedAt DateTime        @default(now())
+  sessionId    String? // linked parking session if matched
+  session      ParkingSession? @relation(fields: [sessionId], references: [id])
+  resolvedBy   String? // guard who resolved
+  resolvedAt   DateTime?
+  status       String          @default("pending") // pending, confirmed, falsePositive
+  createdAt    DateTime        @default(now())
+}
+
+// --------------------------------------------------------
+// Notifications
+// --------------------------------------------------------
+
+model Notification {
+  id        String   @id @default(uuid())
+  userId    String? // nullable for system notifications
+  user      User?    @relation(fields: [userId], references: [id])
+  type      String // "reservation", "session", "payment", "system"
+  title     String
+  message   String
+  data      Json? // flexible payload
+  isRead    Boolean  @default(false)
+  actionUrl String? // deep link or API endpoint
+  createdAt DateTime @default(now())
+
+  // Indexes
+  @@index([userId])
+}
+
+// --------------------------------------------------------
+// Activity Logs (audit trail)
+// --------------------------------------------------------
+
+model ActivityLog {
+  id         String   @id @default(uuid())
+  userId     String? // nullable for system events
+  user       User?    @relation(fields: [userId], references: [id])
+  action     String // "login", "logout", "reserve", "exit", "payment", etc.
+  entityType String? // "Reservation", "ParkingSession", "Payment", etc.
+  entityId   String? // the specific record ID
+  ipAddress  String?
+  userAgent  String?
+  location   String? // derived from IP
+  details    Json? // additional context
+  createdAt  DateTime @default(now())
+
+  // Indexes
+  @@index([entityType, entityId])
+  @@index([userId, createdAt])
+}
+
+// --------------------------------------------------------
+// Support Tickets
+// --------------------------------------------------------
+
+model SupportTicket {
+  id          String         @id @default(uuid())
+  userId      String? // nullable for admin-created tickets
+  user        User?          @relation(fields: [userId], references: [id])
+  title       String
+  description String
+  category    String // "billing", "technical", "access", "other"
+  status      TicketStatus   @default(OPEN)
+  priority    TicketPriority @default(MEDIUM)
+  assignedTo  String? // admin/staff member handling
+  resolvedAt  DateTime?
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+}
+
+enum TicketStatus {
+  OPEN
+  IN_PROGRESS
+  RESOLVED
+  CLOSED
+}
+
+enum TicketPriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+// --------------------------------------------------------
+// Incident Reports
+// --------------------------------------------------------
+
+model IncidentReport {
+  id          String          @id @default(uuid())
+  facilityId  String
+  facility    ParkingFacility @relation(fields: [facilityId], references: [id])
+  reporterId  String? // user or guard who reported
+  reporter    User?           @relation(fields: [reporterId], references: [id])
+  type        String // "theft", "vandalism", "conflict", "violation", "other"
+  title       String
+  description String
+  location    String? // within facility
+  severity    String // "low", "medium", "high", "critical"
+  status      IncidentStatus  @default(OPEN)
+  evidence    Json? // photos, videos, references
+  resolvedBy  String?
+  resolvedAt  DateTime?
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+}
+
+enum IncidentStatus {
+  OPEN
+  INVESTIGATING
+  RESOLVED
+  CLOSED
+}
+
+// --------------------------------------------------------
+// Refresh Tokens
+// --------------------------------------------------------
+
+model RefreshToken {
+  id        String    @id @default(uuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id])
+  tokenHash String // bcrypt hash of refresh token
+  expiresAt DateTime
+  revoked   Boolean   @default(false)
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@unique([userId, tokenHash])
+}

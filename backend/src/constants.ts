@@ -1,0 +1,63 @@
+/**
+ * Application constants for the Smart Parking Management System.
+ * 
+ * @author Principal Backend Engineer
+ * @version 0.1.0
+ */
+
+export const LOG_DIR = "logs";
+export const DEFAULT_CURRENCY = "UZS";
+export const DEFAULT_TIMEZONE = "Asia/Tashkent";
+export const USER_ROLES = {
+  ADMIN: "ADMIN",
+  GUARD: "GUARD",
+  USER: "USER",
+};
+export const SPACE_STATUSES = {
+  AVAILABLE: "AVAILABLE",
+  RESERVED: "RESERVED",
+  OCCUPIED: "OCCUPIED",
+  MAINTENANCE: "MAINTENANCE",
+  RESERVED_HELD: "RESERVED_HELD",
+};
+export const RESERVATION_STATUSES = {
+  CONFIRMED: "CONFIRMED",
+  CANCELLED: "CANCELLED",
+  EXPIRED: "EXPIRED",
+  COMPLETED: "COMPLETED",
+};
+export const SESSION_STATUSES = {
+  ACTIVE: "ACTIVE",
+  COMPLETED: "COMPLETED",
+  CANCELLED: "CANCELLED",
+  EXPIRED: "EXPIRED",
+};
+export const QR_STATUS = {
+  ACTIVE: "ACTIVE",
+  USED: "USED",
+  EXPIRED: "EXPIRED",
+  REVOKED: "REVOKED",
+};
+export const PAYMENT_METHODS = {
+  CLICK: "CLICK",
+  PAYME: "PAYME",
+  CASH: "CASH",
+};
+export const PAYMENT_STATUSES = {
+  PENDING: "PENDING",
+  COMPLETED: "COMPLETED",
+  FAILED: "FAILED",
+  REFUNDED: "REFUNDED",
+};
+export const PRICING_RULE_TYPES = {
+  HOURLY: "HOURLY",
+  DAILY: "DAILY",
+  FIXED_RESERVATION: "FIXED_RESERVATION",
+  PEAK_HOUR: "PEAK_HOUR",
+};
+export const SESSION_STATUS = {
+  ACTIVE: "ACTIVE",
+  COMPLETED: "COMPLETED",
+  CANCELLED: "CANCELLED",
+  EXPIRED: "EXPIRED",
+};
