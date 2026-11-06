@@ -16,7 +16,7 @@ import {
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useMutation } from '@tanstack/react-query';
-import { api } from '@/lib/api';
+import { api, USE_FIXTURES } from '@/lib/api';
 import { ApiError } from '@/lib/api/errors';
 import {
   useAllReservations,
@@ -27,6 +27,7 @@ import {
   useGuardSummary,
   useSessions,
   useSpaces,
+  useVerifyQr,
 } from '@/lib/api/hooks';
 import { formatAmount, formatDateTime, formatDuration, formatFullDateTime } from '@/lib/format';
 import { usePageTitle } from '@/hooks/use-page-title';
@@ -262,7 +263,7 @@ export function GuardEntryPage() {
   const [params] = useSearchParams();
   const initialPlate = params.get('plate') ?? '';
   const [plate, setPlate] = useState(initialPlate);
-  const [walkIn, setWalkIn] = useState(false);
+  const [walkIn, setWalkIn] = useState(!USE_FIXTURES);
   const [spaceId, setSpaceId] = useState('');
   const [error, setError] = useState('');
   const [lastEntry, setLastEntry] = useState<ParkingSession | null>(null);
@@ -270,7 +271,8 @@ export function GuardEntryPage() {
 
   usePageTitle(t('guard.entryTitle'));
 
-  const spaces = useSpaces({ facilityId }, Boolean(facilityId));
+  const effectiveWalkIn = USE_FIXTURES ? walkIn : true;
+  const spaces = useSpaces({ facilityId }, USE_FIXTURES && Boolean(facilityId));
   const available = useMemo(
     () => (spaces.data ?? []).filter((space) => space.status === 'AVAILABLE'),
     [spaces.data],
@@ -284,12 +286,12 @@ export function GuardEntryPage() {
   const expectedArrivals = useAllReservations(facilityId || undefined);
 
   useEffect(() => {
-    if (!walkIn) return;
+    if (!effectiveWalkIn) return;
     if (!spaceId && available.length > 0) setSpaceId(available[0].id);
     if (spaceId && !available.some((space) => space.id === spaceId)) {
       setSpaceId(available[0]?.id ?? '');
     }
-  }, [walkIn, spaceId, available]);
+  }, [effectiveWalkIn, spaceId, available]);
 
   const reservation = lookup.data?.reservation;
   const activeSession = lookup.data?.activeSession;
@@ -340,7 +342,7 @@ export function GuardEntryPage() {
       setError(t('guard.alreadyInside'));
       return;
     }
-    if (!walkIn) {
+    if (!effectiveWalkIn) {
       if (!validReservation) {
         setError(t('guard.noActiveSession'));
         return;
@@ -350,7 +352,7 @@ export function GuardEntryPage() {
         return;
       }
     }
-    if (walkIn && !spaceId) {
+    if (USE_FIXTURES && effectiveWalkIn && !spaceId) {
       setError(t('errors.spaceRequired'));
       return;
     }
@@ -358,10 +360,10 @@ export function GuardEntryPage() {
       {
         facilityId,
         plate: normalized,
-        reservationId: walkIn ? undefined : validReservation?.id,
-        spaceId: walkIn ? spaceId : undefined,
+        reservationId: effectiveWalkIn ? undefined : validReservation?.id,
+        spaceId: USE_FIXTURES && effectiveWalkIn ? spaceId : undefined,
         guardId: user?.id,
-        walkIn,
+        walkIn: effectiveWalkIn,
       },
       {
         onSuccess: (session) => {
@@ -383,7 +385,9 @@ export function GuardEntryPage() {
     );
   };
 
-  const canSubmit = Boolean(facilityId && plate.trim()) && (walkIn ? Boolean(spaceId) : Boolean(validReservation));
+  const canSubmit =
+    Boolean(facilityId && plate.trim()) &&
+    (!USE_FIXTURES || (effectiveWalkIn ? Boolean(spaceId) : Boolean(validReservation)));
   const currentFacility = facilities.data.find((facility) => facility.id === facilityId);
 
   return (
@@ -451,45 +455,58 @@ export function GuardEntryPage() {
                 autoComplete="off"
                 aria-invalid={Boolean(error)}
               />
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => void detectPlate()}
-                loading={detecting}
-                className="shrink-0"
-              >
-                <Camera />
-                {t('guard.detectPlate')}
-              </Button>
+              {USE_FIXTURES && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => void detectPlate()}
+                  loading={detecting}
+                  className="shrink-0"
+                >
+                  <Camera />
+                  {t('guard.detectPlate')}
+                </Button>
+              )}
             </div>
           </Field>
 
-          <Button
-            type="button"
-            variant="secondary"
-            onClick={runLookup}
-            loading={lookup.isPending}
-            disabled={!facilityId}
-          >
-            <KeyRound />
-            {t('guard.lookup')}
-          </Button>
+          {USE_FIXTURES && (
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={runLookup}
+              loading={lookup.isPending}
+              disabled={!facilityId}
+            >
+              <KeyRound />
+              {t('guard.lookup')}
+            </Button>
+          )}
 
           <div className="rounded-lg border border-border bg-muted/20 px-3">
-            <SwitchField
-              id="entry-walkin"
-              checked={walkIn}
-              onCheckedChange={(checked) => {
-                setWalkIn(checked);
-                lookup.reset();
-                setError('');
-              }}
-              label={t('guard.walkIn')}
-              description={t('guard.walkInPlateHint')}
-            />
+            {USE_FIXTURES ? (
+              <SwitchField
+                id="entry-walkin"
+                checked={walkIn}
+                onCheckedChange={(checked) => {
+                  setWalkIn(checked);
+                  lookup.reset();
+                  setError('');
+                }}
+                label={t('guard.walkIn')}
+                description={t('guard.walkInPlateHint')}
+              />
+            ) : (
+              <div className="py-3">
+                <p className="text-[13px] font-medium text-foreground">{t('guard.walkIn')}</p>
+                <p className="mt-0.5 text-[11px] text-muted-foreground">
+                  {t('guard.walkInPlateHint')}
+                </p>
+              </div>
+            )}
           </div>
 
-          {lookup.data && (
+          {USE_FIXTURES && lookup.data && (
             <div className="rounded-xl border border-border bg-muted/30 p-4">
               {activeSession ? (
                 <div className="flex items-start gap-2.5 text-[13px] text-destructive">
@@ -524,7 +541,7 @@ export function GuardEntryPage() {
             </div>
           )}
 
-          {walkIn && (
+          {USE_FIXTURES && walkIn && (
             <Field label={t('guard.assignSpace')} htmlFor="entry-space" required>
               {available.length === 0 ? (
                 <p className="rounded-lg border border-amber-300/60 bg-amber-50/70 px-3 py-2 text-[12px] text-amber-800 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200">
@@ -567,7 +584,9 @@ export function GuardEntryPage() {
               </div>
               <div className="flex items-center justify-between py-2">
                 <dt className="text-[12px] text-muted-foreground">{t('guard.freeSpaces')}</dt>
-                <dd className="text-[12px] font-medium text-foreground">{available.length}</dd>
+                <dd className="text-[12px] font-medium text-foreground">
+                  {currentFacility?.availableSpaces ?? available.length}
+                </dd>
               </div>
               <div className="flex items-center justify-between py-2">
                 <dt className="text-[12px] text-muted-foreground">{t('guard.plateLabel')}</dt>
@@ -589,6 +608,7 @@ export function GuardExitPage() {
   const { user } = useAuth();
   const [params] = useSearchParams();
   const [plate, setPlate] = useState(params.get('plate') ?? '');
+  const [qrToken, setQrToken] = useState(params.get('qr') ?? '');
   const [error, setError] = useState('');
   const [pay, setPay] = useState(true);
   const [method, setMethod] = useState<PaymentMethod>('CASH');
@@ -643,16 +663,22 @@ export function GuardExitPage() {
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
-    if (!found) {
+    const token = qrToken.trim();
+    if (!token && !found) {
       runLookup();
       return;
     }
     setError('');
-    const shouldPay = !found.paid && pay;
+    const shouldPay = token ? pay : Boolean(found && !found.paid && pay);
     checkOut.mutate(
       {
-        id: found.id,
-        input: { pay: shouldPay, method, guardId: user?.id },
+        id: found?.id ?? '',
+        input: {
+          pay: shouldPay,
+          method,
+          guardId: user?.id,
+          ...(token ? { qrToken: token } : { plate: found?.vehiclePlate }),
+        },
       },
       {
         onSuccess: (result) => {
@@ -665,6 +691,7 @@ export function GuardExitPage() {
             }),
           );
           setPlate('');
+          setQrToken('');
           lookup.reset();
         },
         onError: (mutationError) =>
@@ -700,6 +727,13 @@ export function GuardExitPage() {
 
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_380px]">
         <form onSubmit={submit} className="space-y-4 rounded-xl border border-border bg-card p-5 shadow-sm" noValidate>
+          {qrToken && (
+            <div className="space-y-1 rounded-xl border border-gold-300/70 bg-gold-50/50 p-4 dark:border-gold-500/30 dark:bg-gold-500/10">
+              <p className="text-[12px] font-semibold text-foreground">{t('guard.scanTitle')}</p>
+              <p className="break-all font-mono text-[11px] text-muted-foreground">{qrToken}</p>
+            </div>
+          )}
+
           <Field
             label={t('guard.plateLabel')}
             htmlFor="exit-plate"
@@ -782,7 +816,7 @@ export function GuardExitPage() {
                 id="exit-pay"
                 checked={pay}
                 onCheckedChange={setPay}
-                label={t('guard.markPaid')}
+                label={USE_FIXTURES ? t('guard.markPaid') : t('guard.initiatePayment')}
                 description={t('guard.finalPrice')}
               />
               {pay && (
@@ -795,8 +829,8 @@ export function GuardExitPage() {
                     <option value="CASH">{t('booking.cashAtExit')}</option>
                     <option value="PAYME">{t('booking.payme')}</option>
                     <option value="CLICK">{t('booking.click')}</option>
-                    <option value="UZCARD">{t('booking.uzcard')}</option>
-                    <option value="HUMO">{t('booking.humo')}</option>
+                    {USE_FIXTURES && <option value="UZCARD">{t('booking.uzcard')}</option>}
+                    {USE_FIXTURES && <option value="HUMO">{t('booking.humo')}</option>}
                   </Select>
                 </Field>
               )}
@@ -808,7 +842,7 @@ export function GuardExitPage() {
             variant="primary"
             className="w-full"
             loading={checkOut.isPending}
-            disabled={!found}
+            disabled={!found && !qrToken.trim()}
           >
             <ArrowUpFromLine />
             {t('guard.confirmExit')}
@@ -889,6 +923,7 @@ export function GuardScanPage() {
   usePageTitle(t('guard.scanTitle'));
 
   const lookup = useMutation({ mutationFn: (query: string) => api.sessions.lookup(query) });
+  const verify = useVerifyQr();
   const checkIn = useCheckIn();
 
   const stopScan = () => {
@@ -921,7 +956,17 @@ export function GuardScanPage() {
     stopScan();
     setError('');
     setEntryDone(null);
-    lookup.mutate(trimmed, {
+    if (USE_FIXTURES) {
+      lookup.mutate(trimmed, {
+        onError: (mutationError) =>
+          setError(mutationError instanceof ApiError ? mutationError.message : t('errors.generic')),
+      });
+      return;
+    }
+    verify.mutate(trimmed, {
+      onSuccess: (data) => {
+        if (!data.valid) setError(t('qr.invalid'));
+      },
       onError: (mutationError) =>
         setError(mutationError instanceof ApiError ? mutationError.message : t('errors.generic')),
     });
@@ -1008,6 +1053,13 @@ export function GuardScanPage() {
   };
 
   const invalid = lookup.isSuccess && !validReservation && !activeSession;
+  const purposeKey = !verify.data
+    ? null
+    : verify.data.purpose === 'entry'
+      ? 'guard.qrPurposeEntry'
+      : verify.data.purpose === 'exit'
+        ? 'guard.qrPurposeExit'
+        : 'guard.qrPurposeReservation';
 
   return (
     <div className="space-y-6">
@@ -1071,15 +1123,18 @@ export function GuardScanPage() {
               <Input
                 value={code}
                 onChange={(event) => {
-                  setCode(event.target.value.toUpperCase());
+                  // QR tokens are case-sensitive hex strings; uppercasing them
+                  // makes the backend look up a different token.
+                  setCode(event.target.value);
                   lookup.reset();
+                  verify.reset();
                   setError('');
                 }}
                 placeholder={t('qr.manualPlaceholder')}
                 className="font-mono"
                 aria-label={t('guard.qrManual')}
               />
-              <Button type="submit" variant="outline" loading={lookup.isPending}>
+              <Button type="submit" variant="outline" loading={lookup.isPending || verify.isPending}>
                 {t('qr.validate')}
               </Button>
             </form>
@@ -1109,9 +1164,55 @@ export function GuardScanPage() {
             </div>
           )}
 
-          {lookup.isPending && (
+          {(lookup.isPending || verify.isPending) && (
             <div className="flex min-h-40 items-center justify-center rounded-xl border border-border bg-card">
               <Spinner />
+            </div>
+          )}
+
+          {!USE_FIXTURES && verify.data && (
+            <div className="rounded-xl border border-border bg-card p-5 shadow-sm">
+              <div className="flex items-center gap-2">
+                <CircleCheck className="size-4 text-emerald-600 dark:text-emerald-300" />
+                <p className="text-[13px] font-semibold text-foreground">{t('guard.qrVerified')}</p>
+              </div>
+              <dl className="mt-3 divide-y divide-border">
+                <div className="flex items-center justify-between py-2">
+                  <dt className="text-[12px] text-muted-foreground">{t('guard.qrPurpose')}</dt>
+                  <dd className="text-[12px] font-medium text-foreground">
+                    {purposeKey ? t(purposeKey) : '—'}
+                  </dd>
+                </div>
+                {verify.data.sessionStatus && (
+                  <div className="flex items-center justify-between py-2">
+                    <dt className="text-[12px] text-muted-foreground">{t('guard.paymentStatus')}</dt>
+                    <dd>
+                      <StatusBadge status={verify.data.sessionStatus} />
+                    </dd>
+                  </div>
+                )}
+                {verify.data.expiresAt && (
+                  <div className="flex items-center justify-between py-2">
+                    <dt className="text-[12px] text-muted-foreground">{t('guard.qrExpires')}</dt>
+                    <dd className="text-right text-[12px] font-medium text-foreground">
+                      {formatFullDateTime(verify.data.expiresAt, language)}
+                    </dd>
+                  </div>
+                )}
+              </dl>
+              {verify.data.purpose === 'exit' && (
+                <Button asChild className="mt-3 w-full">
+                  <Link to={`/guard/exit?qr=${encodeURIComponent(code.trim())}`}>
+                    <ArrowUpFromLine />
+                    {t('guard.confirmExit')}
+                  </Link>
+                </Button>
+              )}
+              {verify.data.purpose === 'reservation' && (
+                <p className="mt-3 rounded-lg border border-amber-300/60 bg-amber-50/70 px-3 py-2 text-[12px] text-amber-900 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200">
+                  {t('guard.qrReservationEntry')}
+                </p>
+              )}
             </div>
           )}
 
@@ -1187,7 +1288,13 @@ export function GuardScanPage() {
             <EmptyState icon={<QrCode />} title={t('qr.invalid')} description={t('guard.qrInvalid')} />
           )}
 
-          {!activeSession && !validReservation && !entryDone && !lookup.isPending && !invalid && (
+          {!activeSession &&
+            !validReservation &&
+            !entryDone &&
+            !lookup.isPending &&
+            !verify.isPending &&
+            !verify.data &&
+            !invalid && (
             <div className="rounded-xl border border-dashed border-border bg-card/50 p-6 text-center">
               <QrCode className="mx-auto size-6 text-muted-foreground" />
               <p className="mt-2 text-[12px] text-muted-foreground">{t('qr.manualHint')}</p>

@@ -10,8 +10,11 @@ import {
 import type { AuthSession, Role, User } from '@/lib/types';
 import { api } from '@/lib/api';
 import { clearAuthTokens, setAuthTokens } from '@/lib/api/client';
-
-const STORAGE_KEY = 'parkovka.session.v1';
+import {
+  AUTH_EXPIRED_EVENT,
+  readSession,
+  writeSession,
+} from '@/lib/api/session-store';
 
 type AuthStatus = 'loading' | 'authenticated' | 'anonymous';
 
@@ -25,33 +28,18 @@ interface AuthContextValue {
     phone: string;
     password: string;
   }) => Promise<User>;
-  logout: () => void;
+  logout: () => Promise<void>;
   patchUser: (user: User) => void;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
-function readStoredSession(): AuthSession | null {
-  try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as AuthSession;
-    if (!parsed.accessToken || !parsed.user) return null;
-    // An expired access token is fine when a refresh token exists: the first
-    // authorized request will refresh and retry.
-    if (!parsed.refreshToken && parsed.expiresAt && parsed.expiresAt < Date.now()) return null;
-    return parsed;
-  } catch {
-    return null;
-  }
-}
-
-function persistSession(session: AuthSession | null) {
-  if (!session) {
-    window.localStorage.removeItem(STORAGE_KEY);
-    return;
-  }
-  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(session));
+function usableSession(session: AuthSession | null): AuthSession | null {
+  if (!session?.accessToken || !session.user) return null;
+  // An expired access token is fine when a refresh token exists: the first
+  // authorized request will refresh and retry.
+  if (!session.refreshToken && session.expiresAt && session.expiresAt < Date.now()) return null;
+  return session;
 }
 
 export function roleHome(role: Role) {
@@ -66,8 +54,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     let cancelled = false;
-    const stored = readStoredSession();
+    const stored = usableSession(readSession());
     if (!stored) {
+      if (readSession()) writeSession(null);
       setStatus('anonymous');
       return;
     }
@@ -77,13 +66,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       .then((freshUser) => {
         if (cancelled) return;
         setUser(freshUser);
-        persistSession({ ...stored, user: freshUser });
+        // The client may have rotated the tokens while `me` was in flight;
+        // persist against the newest copy instead of the stale closure value.
+        const latest = readSession() ?? stored;
+        writeSession({ ...latest, user: freshUser });
         setStatus('authenticated');
       })
       .catch(() => {
         if (cancelled) return;
         clearAuthTokens();
-        persistSession(null);
+        writeSession(null);
         setStatus('anonymous');
       });
     return () => {
@@ -91,9 +83,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
+  useEffect(() => {
+    const onExpired = () => {
+      setUser(null);
+      setStatus('anonymous');
+    };
+    window.addEventListener(AUTH_EXPIRED_EVENT, onExpired);
+    return () => window.removeEventListener(AUTH_EXPIRED_EVENT, onExpired);
+  }, []);
+
   const completeLogin = useCallback((session: AuthSession) => {
     setAuthTokens({ accessToken: session.accessToken, refreshToken: session.refreshToken });
-    persistSession(session);
+    writeSession(session);
     setUser(session.user);
     setStatus('authenticated');
     return session.user;
@@ -110,17 +111,26 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     [completeLogin],
   );
 
-  const logout = useCallback(() => {
-    clearAuthTokens();
-    persistSession(null);
-    setUser(null);
-    setStatus('anonymous');
+  const logout = useCallback(async () => {
+    const refreshToken = readSession()?.refreshToken;
+    try {
+      // Revoke the refresh token server-side; the access token keeps working
+      // until it expires, which the backend documents.
+      await api.auth.logout(refreshToken);
+    } catch {
+      /* a failed revoke must not keep the user signed in locally */
+    } finally {
+      clearAuthTokens();
+      writeSession(null);
+      setUser(null);
+      setStatus('anonymous');
+    }
   }, []);
 
   const patchUser = useCallback((next: User) => {
     setUser(next);
-    const stored = readStoredSession();
-    if (stored) persistSession({ ...stored, user: next });
+    const stored = readSession();
+    if (stored) writeSession({ ...stored, user: next });
   }, []);
 
   const value = useMemo<AuthContextValue>(

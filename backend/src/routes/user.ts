@@ -1,14 +1,76 @@
 import { Router, Request, Response, NextFunction } from "express";
-import { body, param, validationResult } from "express-validator";
+import { body } from "express-validator";
+import bcrypt from "bcrypt";
 import { validate } from "../middleware/validation";
 import { authenticate, authorize } from "../utils/jwt";
-import { User } from "../models/user";
-import { PrismaClient } from "@prisma/client"
-const prisma = new PrismaClient()
-import { createError, ErrorCodes, ErrorMessages } from "../utils/http-error";
+import { prisma } from "../utils/db";
+import { createError, ErrorMessages } from "../utils/http-error";
 
 const router = Router();
 
+/**
+ * @route POST /api/users
+ * @desc Create an ADMIN, GUARD or USER account (admin only)
+ * @access Private - Admin only
+ *
+ * Public registration can never assign staff roles; this protected endpoint is
+ * the only way to create them.
+ */
+router.post(
+  "/",
+  authenticate,
+  authorize("ADMIN"),
+  [
+    body("name").trim().notEmpty().withMessage("Name is required"),
+    body("email").trim().isEmail().withMessage("Valid email required").normalizeEmail(),
+    body("password").isLength({ min: 6 }).withMessage("Password must be at least 6 characters"),
+    body("role").isIn(["ADMIN", "GUARD", "USER"]).withMessage("Invalid role"),
+    body("phone").optional().trim(),
+    body("licensePlate").optional().trim(),
+  ],
+  validate,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { name, email, password, role, phone, licensePlate } = req.body;
+
+      const existingUser = await prisma.user.findUnique({ where: { email } });
+      if (existingUser) {
+        return next(createError(409, ErrorMessages.CONFLICT));
+      }
+
+      const saltRounds = Number(process.env.BCRYPT_ROUNDS) || 12;
+      const passwordHash = await bcrypt.hash(password, saltRounds);
+
+      const user = await prisma.user.create({
+        data: {
+          name,
+          email,
+          passwordHash,
+          role,
+          status: "ACTIVE",
+          phone: phone || null,
+          licensePlate: licensePlate || null,
+        },
+        select: {
+          id: true,
+          name: true,
+          email: true,
+          role: true,
+          status: true,
+          createdAt: true,
+        },
+      });
+
+      res.status(201).json({
+        success: true,
+        data: { user },
+        message: "User created successfully",
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
 
 /**
  * @route GET /api/users/me
@@ -21,11 +83,11 @@ router.get(
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const userId = req.user?.id;
-      
+
       if (!userId) {
         return next(createError(404, ErrorMessages.NOT_FOUND));
       }
-      
+
       const user = await prisma.user.findUnique({
         where: { id: userId },
         select: {
@@ -40,15 +102,12 @@ router.get(
           updatedAt: true,
         },
       });
-      
+
       if (!user) {
         return next(createError(404, ErrorMessages.NOT_FOUND));
       }
-      
-      res.json({
-        success: true,
-        data: user,
-      });
+
+      res.json({ success: true, data: user });
     } catch (error) {
       next(error);
     }
@@ -72,18 +131,18 @@ router.patch(
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const userId = req.user?.id;
-      
+
       if (!userId) {
         return next(createError(404, ErrorMessages.NOT_FOUND));
       }
-      
+
       const { name, phone, licensePlate } = req.body;
-      
-      const updateData: any = {};
+
+      const updateData: { name?: string; phone?: string; licensePlate?: string } = {};
       if (name) updateData.name = name;
       if (phone) updateData.phone = phone;
       if (licensePlate) updateData.licensePlate = licensePlate;
-      
+
       const user = await prisma.user.update({
         where: { id: userId },
         data: updateData,
@@ -97,7 +156,7 @@ router.patch(
           status: true,
         },
       });
-      
+
       res.json({
         success: true,
         data: user,
@@ -131,11 +190,8 @@ router.get(
         },
         orderBy: { createdAt: "desc" },
       });
-      
-      res.json({
-        success: true,
-        data: users,
-      });
+
+      res.json({ success: true, data: users });
     } catch (error) {
       next(error);
     }

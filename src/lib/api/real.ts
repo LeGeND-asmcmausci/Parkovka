@@ -10,6 +10,7 @@ import type {
   ParkingSpace,
   Payment,
   PaymentMethod,
+  QrVerification,
   Reservation,
   Role,
   SpaceStatus,
@@ -18,6 +19,7 @@ import type {
 } from '@/lib/types';
 import { ApiError } from './errors';
 import { apiRequest } from './client';
+import { readSession } from './session-store';
 
 /**
  * Adapter for the backend documented in docs/FRONTEND_API_CONTRACT.md.
@@ -42,6 +44,25 @@ interface BackendAuthData {
   tokens: { accessToken: string; refreshToken: string };
 }
 
+interface BackendCoordinates {
+  latitude?: number | string | null;
+  longitude?: number | string | null;
+}
+
+interface BackendPricing {
+  hourlyRate?: number | null;
+  dailyRate?: number | null;
+  currency?: string | null;
+}
+
+interface BackendAvailability {
+  totalSpaces?: number | null;
+  available?: number | null;
+  occupied?: number | null;
+  reserved?: number | null;
+  maintenance?: number | null;
+}
+
 interface BackendFacilitySummary {
   id: string;
   name: string;
@@ -49,12 +70,20 @@ interface BackendFacilitySummary {
   city?: string | null;
   country?: string | null;
   address?: string | null;
+  coordinates?: BackendCoordinates | null;
   latitude?: number | string | null;
   longitude?: number | string | null;
+  openingHours?: string | null;
+  parkingType?: string | null;
+  covered?: boolean | null;
   hourlyRate?: number | null;
   dailyRate?: number | null;
+  pricing?: BackendPricing | null;
   totalSpaces?: number | null;
+  floorCount?: number | null;
+  spaceCount?: number | null;
   status?: string | null;
+  availability?: BackendAvailability | null;
   _count?: { floors?: number; spaces?: number } | null;
 }
 
@@ -66,6 +95,10 @@ interface BackendSpace {
   zoneId?: string | null;
   floorId?: string | null;
   facilityId?: string | null;
+  pricePerHour?: number | null;
+  pricePerDay?: number | null;
+  level?: number | null;
+  zoneName?: string | null;
   zone?: { id?: string; name?: string; zoneCode?: string; zoneType?: string | null } | null;
   floor?: { id?: string; name?: string; floorName?: string; level?: number } | null;
 }
@@ -75,6 +108,8 @@ interface BackendZone {
   name?: string | null;
   zoneCode?: string | null;
   zoneType?: string | null;
+  covered?: boolean | null;
+  status?: string | null;
   totalSpaces?: number | null;
   floorId?: string | null;
   spaces?: BackendSpace[] | null;
@@ -89,11 +124,35 @@ interface BackendFloor {
   totalSpaces?: number | null;
   status?: string | null;
   zones?: BackendZone[] | null;
+  unzonedSpaces?: BackendSpace[] | null;
+}
+
+interface BackendFloorsResponse {
+  facilityId: string;
+  facilityName?: string;
+  floors?: BackendFloor[] | null;
+  availability?: BackendAvailability | null;
 }
 
 interface BackendFacilityDetail extends BackendFacilitySummary {
   floors?: BackendFloor[] | null;
 }
+
+interface BackendCancelResponse {
+  id: string;
+  status: string;
+  canceledAt?: string | null;
+}
+
+interface BackendQrVerification {
+  valid: boolean;
+  purpose: 'entry' | 'exit' | 'reservation';
+  parkingSessionId?: string | null;
+  sessionStatus?: string | null;
+  facilityId?: string | null;
+  expiresAt?: string | null;
+}
+
 
 interface BackendReservationSpace {
   id: string;
@@ -126,7 +185,7 @@ interface BackendSession {
   id: string;
   userId?: string | null;
   spaceId: string;
-  facilityId: string;
+  facilityId?: string | null;
   entryTime: string;
   expectedExit?: string | null;
   actualExitTime?: string | null;
@@ -134,7 +193,8 @@ interface BackendSession {
   finalPriceCents?: number | null;
   status?: string | null;
   space?: BackendSpace | null;
-  vehicle?: { plateNumber?: string } | null;
+  vehicle?: { id?: string; plateNumber?: string } | null;
+  facility?: { id?: string; name?: string } | null;
 }
 
 interface BackendEntryResponse {
@@ -147,7 +207,7 @@ interface BackendExitResponse {
   session: BackendSession;
   finalPriceCents?: number;
   durationMinutes?: number;
-  exitQrToken?: string;
+  space?: { id?: string; spaceNumber?: string; status?: string } | null;
 }
 
 interface BackendPayment {
@@ -179,6 +239,7 @@ interface SpaceFallback {
   amountCents?: number;
   vehicleId?: string;
   vehiclePlate?: string;
+  reservationId?: string;
   qrToken?: string;
 }
 
@@ -196,7 +257,33 @@ const slugIndex = new Map<string, string>();
 const floorIndex = new Map<string, string>();
 const zoneIndex = new Map<string, string>();
 const spaceIndex = new Map<string, string>();
-const reservationQrTokens = new Map<string, string>();
+const QR_STORAGE_KEY = 'parkovka.reservationQr.v1';
+
+function readStoredQrTokens(): Record<string, string> {
+  if (typeof window === 'undefined') return {};
+  try {
+    const parsed = JSON.parse(window.sessionStorage.getItem(QR_STORAGE_KEY) ?? 'null');
+    return parsed && typeof parsed === 'object' ? (parsed as Record<string, string>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function persistQrTokens() {
+  if (typeof window === 'undefined') return;
+  try {
+    window.sessionStorage.setItem(
+      QR_STORAGE_KEY,
+      JSON.stringify(Object.fromEntries(reservationQrTokens)),
+    );
+  } catch {
+    // Storage can be blocked or full; the in-memory map still works for this tab.
+  }
+}
+
+// The backend returns the reservation QR only in the create response, so keep it
+// for reloads within the tab instead of rendering an empty QR code.
+const reservationQrTokens = new Map<string, string>(Object.entries(readStoredQrTokens()));
 let listCache: { at: number; items: BackendFacilitySummary[] } | null = null;
 
 export function notSupported(feature: string, hint?: string): Promise<never> {
@@ -331,13 +418,7 @@ function tokenExpiry(token: string | undefined): number {
 }
 
 function readStoredUser(): User | undefined {
-  try {
-    const raw = window.localStorage.getItem('parkovka.session.v1');
-    if (!raw) return undefined;
-    return (JSON.parse(raw) as AuthSession).user;
-  } catch {
-    return undefined;
-  }
+  return readSession()?.user;
 }
 
 function mapUser(raw: BackendUser, fallback?: Partial<User>): User {
@@ -371,27 +452,70 @@ function registerIndexes(bundle: FacilityBundle) {
   bundle.spaces.forEach((space) => spaceIndex.set(space.id, facility.id));
 }
 
-function mapFacilityDetail(detail: BackendFacilityDetail): FacilityBundle {
+function mapOpeningHours(
+  value: string | null | undefined,
+): Pick<FacilityWithAvailability, 'open24h' | 'openTime' | 'closeTime'> {
+  const text = (value ?? '').trim();
+  const range = text.match(/(\d{1,2}:\d{2})\s*[-–]\s*(\d{1,2}:\d{2})/);
+  if (range) return { open24h: false, openTime: range[1], closeTime: range[2] };
+  return { open24h: true, openTime: '00:00', closeTime: '23:59' };
+}
+
+function facilityBase(raw: BackendFacilitySummary): FacilityWithAvailability {
+  const hours = mapOpeningHours(raw.openingHours);
+  return {
+    id: raw.id,
+    slug: slugify(raw.name, raw.id),
+    name: localize(raw.name),
+    description: localize(raw.description),
+    address: localize(raw.address),
+    city: mapCity(raw.city),
+    district: localize(raw.address || raw.city),
+    lat: toNumber(raw.coordinates?.latitude ?? raw.latitude),
+    lng: toNumber(raw.coordinates?.longitude ?? raw.longitude),
+    type: 'PUBLIC',
+    image: '/images/facility-city.jpg',
+    ...hours,
+    amenities: raw.covered ? ['covered'] : [],
+    rules: [],
+    hourlyRate: raw.pricing?.hourlyRate ?? raw.hourlyRate ?? 0,
+    dailyCap: raw.pricing?.dailyRate ?? raw.dailyRate ?? 0,
+    reservationFee: 0,
+    rating: 0,
+    reviewCount: 0,
+    totalSpaces: raw.totalSpaces ?? raw.spaceCount ?? raw._count?.spaces ?? 0,
+    phone: '',
+    status: mapFacilityStatus(raw.status),
+    availableSpaces: raw.availability?.available ?? 0,
+    occupiedSpaces: raw.availability?.occupied ?? 0,
+    reservedSpaces: raw.availability?.reserved ?? 0,
+  };
+}
+
+function mapFacilityDetail(
+  detail: BackendFacilityDetail,
+  layout: BackendFloorsResponse,
+): FacilityBundle {
   const floors: Floor[] = [];
   const zones: Zone[] = [];
   const spaces: ParkingSpace[] = [];
 
-  (detail.floors ?? []).forEach((floorRaw, floorIdx) => {
+  (layout.floors ?? []).forEach((floorRaw, floorIdx) => {
     const floorId = floorRaw.id;
     const level = floorRaw.level ?? floorIdx + 1;
     const floorName = floorRaw.name || floorRaw.floorName || `P${level}`;
     let floorSpaceCount = 0;
+    let rowIdx = 0;
 
-    (floorRaw.zones ?? []).forEach((zoneRaw, zoneIdx) => {
+    (floorRaw.zones ?? []).forEach((zoneRaw) => {
       const zoneId = zoneRaw.id;
-      const zoneCode = zoneRaw.zoneCode || zoneRaw.name || String.fromCharCode(65 + zoneIdx);
-      const zoneType = mapZoneType(zoneRaw.zoneType);
+      const zoneCode = zoneRaw.zoneCode || zoneRaw.name || 'Z';
       zones.push({
         id: zoneId,
         facilityId: detail.id,
         floorId,
         name: zoneRaw.name || zoneCode,
-        type: zoneType,
+        type: mapZoneType(zoneRaw.zoneType),
         rateMultiplier: 1,
       });
 
@@ -405,7 +529,7 @@ function mapFacilityDetail(detail: BackendFacilityDetail): FacilityBundle {
           floorId,
           zoneId,
           x: Math.round(74 + spaceIdx * step),
-          y: 52 + zoneIdx * 148,
+          y: 52 + rowIdx * 148,
           w: 84,
           h: 92,
           status: mapSpaceStatus(spaceRaw.status),
@@ -415,6 +539,26 @@ function mapFacilityDetail(detail: BackendFacilityDetail): FacilityBundle {
         });
         floorSpaceCount += 1;
       });
+      rowIdx += 1;
+    });
+
+    (floorRaw.unzonedSpaces ?? []).forEach((spaceRaw, spaceIdx) => {
+      spaces.push({
+        id: spaceRaw.id,
+        code: spaceRaw.spaceNumber,
+        facilityId: detail.id,
+        floorId,
+        zoneId: '',
+        x: 74 + (spaceIdx % 8) * 100,
+        y: 52 + (rowIdx + Math.floor(spaceIdx / 8)) * 148,
+        w: 84,
+        h: 92,
+        status: mapSpaceStatus(spaceRaw.status),
+        type: mapZoneType(spaceRaw.spaceType),
+        sensor: false,
+        updatedAt: new Date().toISOString(),
+      });
+      floorSpaceCount += 1;
     });
 
     floors.push({
@@ -427,76 +571,12 @@ function mapFacilityDetail(detail: BackendFacilityDetail): FacilityBundle {
     });
   });
 
-  const count = (status: SpaceStatus) => spaces.filter((space) => space.status === status).length;
-  const available = count('AVAILABLE');
-  const occupied = count('OCCUPIED');
-  const reserved = count('RESERVED');
-  const totalSpaces = detail.totalSpaces || spaces.length || detail._count?.spaces || 0;
-
-  const facility: FacilityWithAvailability = {
-    id: detail.id,
-    slug: slugify(detail.name, detail.id),
-    name: localize(detail.name),
-    description: localize(detail.description),
-    address: localize(detail.address),
-    city: mapCity(detail.city),
-    district: localize(detail.address || detail.city),
-    lat: toNumber(detail.latitude),
-    lng: toNumber(detail.longitude),
-    type: 'PUBLIC',
-    image: '/images/facility-city.jpg',
-    open24h: true,
-    openTime: '00:00',
-    closeTime: '23:59',
-    amenities: [],
-    rules: [],
-    hourlyRate: detail.hourlyRate ?? 0,
-    dailyCap: detail.dailyRate ?? 0,
-    reservationFee: 0,
-    rating: 0,
-    reviewCount: 0,
-    totalSpaces,
-    phone: '',
-    status: mapFacilityStatus(detail.status),
-    availableSpaces: available,
-    occupiedSpaces: occupied,
-    reservedSpaces: reserved,
-  };
+  const facility = facilityBase(detail);
+  if (!detail.totalSpaces && spaces.length > 0) facility.totalSpaces = spaces.length;
 
   return { facility, floors, zones, spaces };
 }
 
-function mapFacilitySummary(summary: BackendFacilitySummary): FacilityWithAvailability {
-  return {
-    id: summary.id,
-    slug: slugify(summary.name, summary.id),
-    name: localize(summary.name),
-    description: localize(summary.description),
-    address: localize(summary.address),
-    city: mapCity(summary.city),
-    district: localize(summary.address || summary.city),
-    lat: toNumber(summary.latitude),
-    lng: toNumber(summary.longitude),
-    type: 'PUBLIC',
-    image: '/images/facility-city.jpg',
-    open24h: true,
-    openTime: '00:00',
-    closeTime: '23:59',
-    amenities: [],
-    rules: [],
-    hourlyRate: summary.hourlyRate ?? 0,
-    dailyCap: summary.dailyRate ?? 0,
-    reservationFee: 0,
-    rating: 0,
-    reviewCount: 0,
-    totalSpaces: summary.totalSpaces || summary._count?.spaces || 0,
-    phone: '',
-    status: mapFacilityStatus(summary.status),
-    availableSpaces: 0,
-    occupiedSpaces: 0,
-    reservedSpaces: 0,
-  };
-}
 
 async function fetchFacilityList(): Promise<BackendFacilitySummary[]> {
   if (listCache && Date.now() - listCache.at < CACHE_TTL) return listCache.items;
@@ -513,8 +593,11 @@ async function getBundle(facilityId: string): Promise<FacilityBundle> {
   if (pending) return pending;
 
   const request = (async () => {
-    const detail = await apiRequest<BackendFacilityDetail>(`/parking/${facilityId}`);
-    const bundle = mapFacilityDetail(detail);
+    const [detail, layout] = await Promise.all([
+      apiRequest<BackendFacilityDetail>(`/parking/${facilityId}`),
+      apiRequest<BackendFloorsResponse>(`/parking/${facilityId}/floors`),
+    ]);
+    const bundle = mapFacilityDetail(detail, layout);
     bundles.set(facilityId, { at: Date.now(), bundle });
     registerIndexes(bundle);
     return bundle;
@@ -646,13 +729,13 @@ function mapSession(raw: BackendSession, fallback: SpaceFallback = {}): ParkingS
   return {
     id: raw.id,
     reference: deriveReference('SES', raw.id),
-    facilityId: raw.facilityId || fallback.facilityId || '',
+    facilityId: raw.facilityId || raw.facility?.id || fallback.facilityId || '',
     floorId: space?.floorId ?? fallback.floorId ?? '',
     zoneId: space?.zoneId ?? fallback.zoneId ?? '',
     spaceId: raw.spaceId || space?.id || fallback.spaceId || '',
     spaceCode: space?.spaceNumber ?? fallback.spaceCode ?? '',
     userId: raw.userId ?? undefined,
-    vehiclePlate: raw.vehicle?.plateNumber ?? '',
+    vehiclePlate: raw.vehicle?.plateNumber ?? fallback.vehiclePlate ?? '',
     entryAt: raw.entryTime,
     exitAt: raw.actualExitTime ?? undefined,
     status: raw.status === 'ACTIVE' ? 'ACTIVE' : 'COMPLETED',
@@ -697,23 +780,31 @@ function mapInitiatedPayment(
   };
 }
 
-async function fetchGuardSessions(): Promise<BackendSession[]> {
-  try {
-    return await apiRequest<BackendSession[]>('/guard/sessions');
-  } catch (error) {
-    if (error instanceof ApiError && (error.status === 401 || error.status === 403)) {
-      throw new ApiError(
-        'NOT_SUPPORTED',
-        'GET /api/guard/sessions is guard-only. The backend has no session listing endpoint for users or admins.',
-        501,
-      );
-    }
-    throw error;
-  }
+async function fetchGuardSessions(facilityId?: string): Promise<BackendSession[]> {
+  const query = facilityId ? `?facilityId=${encodeURIComponent(facilityId)}` : '';
+  return apiRequest<BackendSession[]>(`/guard/sessions${query}`);
 }
 
 function normalizePlate(value: string): string {
   return value.toUpperCase().replace(/\s+/g, ' ').trim();
+}
+
+function mapSpaceFromApi(raw: BackendSpace, facilityId: string, index: number): ParkingSpace {
+  return {
+    id: raw.id,
+    code: raw.spaceNumber,
+    facilityId: raw.facilityId ?? facilityId,
+    floorId: raw.floorId ?? raw.floor?.id ?? '',
+    zoneId: raw.zoneId ?? raw.zone?.id ?? '',
+    x: 74 + (index % 8) * 100,
+    y: 52 + Math.floor(index / 8) * 148,
+    w: 84,
+    h: 92,
+    status: mapSpaceStatus(raw.status),
+    type: mapZoneType(raw.spaceType ?? raw.zone?.zoneType),
+    sensor: false,
+    updatedAt: new Date().toISOString(),
+  };
 }
 
 export const realApi = {
@@ -743,6 +834,14 @@ export const realApi = {
       const data = await apiRequest<BackendUser>('/auth/me');
       return mapUser(data, readStoredUser());
     },
+    async logout(refreshToken?: string): Promise<void> {
+      const token = readSession()?.refreshToken ?? refreshToken;
+      await apiRequest<null>('/auth/logout', {
+        method: 'POST',
+        body: token ? { refreshToken: token } : {},
+        skipRefresh: true,
+      });
+    },
   },
 
   profile: {
@@ -763,17 +862,27 @@ export const realApi = {
   facilities: {
     async list(params: FacilitySearchParams = {}): Promise<FacilityWithAvailability[]> {
       const items = await fetchFacilityList();
-      const mapped = await Promise.all(
-        items.map(async (item) => {
-          try {
-            const bundle = await getBundle(item.id);
-            return bundle.facility;
-          } catch {
-            return mapFacilitySummary(item);
-          }
-        }),
-      );
-      return applyFilters(mapped, params);
+      return applyFilters(items.map(facilityBase), params);
+    },
+    async map(params: {
+      city?: string;
+      parkingType?: string;
+      bounds?: { north: number; south: number; east: number; west: number };
+      limit?: number;
+    } = {}): Promise<FacilityWithAvailability[]> {
+      const query = new URLSearchParams();
+      if (params.city) query.set('city', params.city);
+      if (params.parkingType) query.set('parkingType', params.parkingType);
+      if (params.bounds) {
+        query.set('north', String(params.bounds.north));
+        query.set('south', String(params.bounds.south));
+        query.set('east', String(params.bounds.east));
+        query.set('west', String(params.bounds.west));
+      }
+      if (params.limit) query.set('limit', String(params.limit));
+      const suffix = query.toString() ? `?${query.toString()}` : '';
+      const data = await apiRequest<BackendFacilitySummary[]>(`/parking/map${suffix}`);
+      return data.map(facilityBase);
     },
     async get(idOrSlug: string): Promise<FacilityWithAvailability> {
       const facilityId = await resolveFacilityId(idOrSlug);
@@ -795,35 +904,62 @@ export const realApi = {
       zoneId?: string;
       status?: SpaceStatus;
     } = {}): Promise<ParkingSpace[]> {
-      let bundle: FacilityBundle | null = null;
-      if (filters.facilityId) bundle = await getBundle(filters.facilityId);
-      else if (filters.floorId) bundle = await findBundleByFloor(filters.floorId);
-      else if (filters.zoneId) bundle = await findBundleByZone(filters.zoneId);
-      if (!bundle) return [];
+      let facilityId = filters.facilityId;
+      if (!facilityId && (filters.floorId || filters.zoneId)) {
+        let bundle = filters.floorId
+          ? await findBundleByFloor(filters.floorId)
+          : await findBundleByZone(filters.zoneId as string);
+        if (!bundle) {
+          await ensureAllBundles();
+          bundle = filters.floorId
+            ? await findBundleByFloor(filters.floorId)
+            : await findBundleByZone(filters.zoneId as string);
+        }
+        facilityId = bundle?.facility.id;
+      }
+      if (!facilityId) return [];
 
-      return bundle.spaces.filter((space) => {
-        if (filters.facilityId && space.facilityId !== filters.facilityId) return false;
-        if (filters.floorId && space.floorId !== filters.floorId) return false;
-        if (filters.zoneId && space.zoneId !== filters.zoneId) return false;
-        if (filters.status && space.status !== filters.status) return false;
-        return true;
+      const query = new URLSearchParams();
+      if (filters.status) query.set('status', filters.status);
+      if (filters.floorId) query.set('floorId', filters.floorId);
+      if (filters.zoneId) query.set('zoneId', filters.zoneId);
+      query.set('limit', '500');
+
+      const data = await apiRequest<BackendSpace[]>(
+        `/parking/${facilityId}/spaces?${query.toString()}`,
+      );
+      const bundle = await getBundle(facilityId).catch(() => null);
+      const positions = new Map((bundle?.spaces ?? []).map((space) => [space.id, space]));
+
+      return data.map((raw, index) => {
+        const status = mapSpaceStatus(raw.status);
+        const cached = positions.get(raw.id);
+        if (cached) {
+          cached.status = status;
+          cached.updatedAt = new Date().toISOString();
+          return cached;
+        }
+        return mapSpaceFromApi(raw, facilityId as string, index);
       });
     },
     async availability(spaceId: string): Promise<{ available: boolean }> {
-      const bundle = await findBundleBySpace(spaceId);
-      if (!bundle) return { available: false };
+      let bundle = await findBundleBySpace(spaceId);
+      if (!bundle) {
+        await ensureAllBundles();
+        bundle = await findBundleBySpace(spaceId);
+      }
+      if (!bundle) throw new ApiError('NOT_FOUND', 'Parking space not found', 404);
 
-      const data = await apiRequest<{ spaces?: BackendSpace[] }>(
+      const data = await apiRequest<{ available?: number; spaces?: BackendSpace[] }>(
         `/parking/${bundle.facility.id}/availability`,
       );
       const raw = (data.spaces ?? []).find((space) => space.id === spaceId);
-      const available = raw?.status === 'AVAILABLE';
       const cachedSpace = bundle.spaces.find((space) => space.id === spaceId);
       if (cachedSpace && raw) {
         cachedSpace.status = mapSpaceStatus(raw.status);
         cachedSpace.updatedAt = new Date().toISOString();
       }
-      return { available };
+      return { available: raw?.status === 'AVAILABLE' };
     },
   },
 
@@ -847,7 +983,7 @@ export const realApi = {
         spaceId: string;
         startsAt: string;
         endsAt: string;
-        vehicleId: string;
+        vehicleId?: string;
         paymentMethod: PaymentMethod;
       },
       _userId: string,
@@ -858,13 +994,16 @@ export const realApi = {
         startTime: input.startsAt,
         endTime: input.endsAt,
       };
-      if (isUuid(input.vehicleId)) body.vehicleId = input.vehicleId;
+      if (input.vehicleId && isUuid(input.vehicleId)) body.vehicleId = input.vehicleId;
 
       const data = await apiRequest<BackendReservationResponse>('/reservations', {
         method: 'POST',
         body,
       });
-      if (data.qrToken) reservationQrTokens.set(data.reservation.id, data.qrToken);
+      if (data.qrToken) {
+        reservationQrTokens.set(data.reservation.id, data.qrToken);
+        persistQrTokens();
+      }
 
       const bundle = await findBundleBySpace(input.spaceId).catch(() => null);
       const spaceCode = bundle?.spaces.find((space) => space.id === input.spaceId)?.code;
@@ -883,7 +1022,7 @@ export const realApi = {
       });
     },
     async cancel(id: string): Promise<Reservation> {
-      await apiRequest(`/reservations/${id}/cancel`, { method: 'POST' });
+      await apiRequest<BackendCancelResponse>(`/reservations/${id}/cancel`, { method: 'POST' });
       listCache = null;
       return realApi.reservations.get(id);
     },
@@ -905,7 +1044,7 @@ export const realApi = {
     async list(
       filters: { facilityId?: string; userId?: string; status?: ParkingSession['status'] } = {},
     ): Promise<ParkingSession[]> {
-      const data = await fetchGuardSessions();
+      const data = await fetchGuardSessions(filters.facilityId);
       const mapped = data.map((item) => mapSession(item));
       return mapped.filter((session) => {
         if (filters.facilityId && session.facilityId !== filters.facilityId) return false;
@@ -931,6 +1070,20 @@ export const realApi = {
         vehiclePlate: match?.vehicle?.plateNumber ?? query,
       };
     },
+    async verifyQr(qrToken: string): Promise<QrVerification> {
+      const data = await apiRequest<BackendQrVerification>('/guard/verify-qr', {
+        method: 'POST',
+        body: { qrToken: qrToken.trim() },
+      });
+      return {
+        valid: data.valid,
+        purpose: data.purpose,
+        parkingSessionId: data.parkingSessionId ?? undefined,
+        sessionStatus: (data.sessionStatus as QrVerification['sessionStatus']) ?? undefined,
+        facilityId: data.facilityId ?? undefined,
+        expiresAt: data.expiresAt ?? '',
+      };
+    },
     async checkIn(input: CheckInInput): Promise<ParkingSession> {
       if (!input.walkIn && input.reservationId) {
         throw new ApiError(
@@ -940,7 +1093,7 @@ export const realApi = {
         );
       }
 
-      const body: Record<string, unknown> = { licensePlate: input.plate };
+      const body: Record<string, unknown> = { licensePlate: normalizePlate(input.plate) };
       if (isUuid(input.facilityId)) body.facilityId = input.facilityId;
       if (input.spaceId) {
         const bundle = await findBundleBySpace(input.spaceId).catch(() => null);
@@ -954,12 +1107,13 @@ export const realApi = {
       });
 
       listCache = null;
-      bundles.delete(data.session.facilityId);
+      if (data.session.facilityId) bundles.delete(data.session.facilityId);
 
       return mapSession(data.session, {
         facilityId: input.facilityId,
         spaceId: data.space?.id ?? input.spaceId,
         spaceCode: data.space?.spaceNumber,
+        vehiclePlate: input.plate,
         guardId: input.guardId,
       });
     },
@@ -972,32 +1126,48 @@ export const realApi = {
         );
       }
 
-      const sessions = await fetchGuardSessions();
-      const target = sessions.find((session) => session.id === id);
-      if (!target) throw new ApiError('NOT_FOUND', 'Active parking session not found', 404);
+      let target: BackendSession | undefined;
+      let body: Record<string, unknown>;
+      if (input.qrToken) {
+        body = { qrToken: input.qrToken.trim() };
+      } else if (input.plate) {
+        body = { licensePlate: normalizePlate(input.plate) };
+      } else {
+        const sessions = await fetchGuardSessions();
+        target = sessions.find((session) => session.id === id);
+        if (!target) throw new ApiError('NOT_FOUND', 'Active parking session not found', 404);
+        body = { spaceId: target.spaceId };
+      }
 
       const data = await apiRequest<BackendExitResponse>('/guard/exit', {
         method: 'POST',
-        body: { spaceId: target.spaceId },
+        body,
       });
 
+      const sessionId = data.session.id || id;
+      const facilityId =
+        data.session.facilityId || data.session.facility?.id || target?.facilityId || '';
       listCache = null;
-      bundles.delete(target.facilityId);
+      if (facilityId) bundles.delete(facilityId);
 
-      const session = mapSession(data.session ?? target, {
-        facilityId: target.facilityId,
-        spaceId: target.spaceId,
-        spaceCode: target.space?.spaceNumber,
-        guardId: input.guardId,
-        amountCents: data.finalPriceCents,
-      });
+      const session = mapSession(
+        { ...data.session, id: sessionId },
+        {
+          facilityId,
+          spaceId: data.space?.id ?? data.session.spaceId ?? target?.spaceId,
+          spaceCode: data.space?.spaceNumber ?? target?.space?.spaceNumber,
+          vehiclePlate: input.plate,
+          guardId: input.guardId,
+          amountCents: data.finalPriceCents,
+        },
+      );
 
       let payment: Payment | undefined;
       if (input.pay && data.finalPriceCents && data.finalPriceCents > 0) {
         const initiated = await apiRequest<BackendInitiatedPayment>('/payments', {
           method: 'POST',
           body: {
-            sessionId: id,
+            sessionId,
             amount: data.finalPriceCents,
             paymentMethod: input.method,
           },
@@ -1005,7 +1175,7 @@ export const realApi = {
         payment = mapInitiatedPayment(initiated, {
           userId: session.userId ?? '',
           facilityId: session.facilityId,
-          sessionId: id,
+          sessionId,
         });
       }
 
@@ -1023,6 +1193,43 @@ export const realApi = {
         return true;
       });
     },
+    async create(input: {
+      reservationId?: string;
+      sessionId?: string;
+      amount?: number;
+      paymentMethod: PaymentMethod;
+      description?: string;
+    }): Promise<Payment> {
+      if (input.paymentMethod !== 'CLICK' && input.paymentMethod !== 'PAYME' && input.paymentMethod !== 'CASH') {
+        throw new ApiError(
+          'NOT_SUPPORTED',
+          'POST /api/payments accepts only CLICK, PAYME and CASH.',
+          501,
+        );
+      }
+      const body: Record<string, unknown> = { paymentMethod: input.paymentMethod };
+      if (input.reservationId) body.reservationId = input.reservationId;
+      if (input.sessionId) body.sessionId = input.sessionId;
+      if (typeof input.amount === 'number' && input.amount > 0) body.amount = input.amount;
+      if (input.description) body.description = input.description;
+
+      const initiated = await apiRequest<BackendInitiatedPayment>('/payments', {
+        method: 'POST',
+        body,
+      });
+      return {
+        id: initiated.paymentId,
+        reference: deriveReference('PAY', initiated.paymentId),
+        userId: readSession()?.user.id ?? '',
+        reservationId: input.reservationId,
+        sessionId: input.sessionId,
+        facilityId: '',
+        amount: centsToAmount(initiated.amount),
+        method: mapPaymentMethod(initiated.paymentMethod),
+        status: mapPaymentState(initiated.status),
+        createdAt: new Date().toISOString(),
+      };
+    },
   },
 
   admin: {
@@ -1030,6 +1237,29 @@ export const realApi = {
       const data = await apiRequest<BackendUser[]>('/users');
       const mapped = data.map((item) => mapUser(item));
       return role ? mapped.filter((user) => user.role === role) : mapped;
+    },
+    async createUser(input: {
+      name: string;
+      email: string;
+      password: string;
+      role: Role;
+      phone?: string;
+      licensePlate?: string;
+    }): Promise<User> {
+      const body: Record<string, unknown> = {
+        name: input.name,
+        email: input.email,
+        password: input.password,
+        role: input.role,
+      };
+      if (input.phone) body.phone = input.phone;
+      if (input.licensePlate) body.licensePlate = input.licensePlate;
+
+      const data = await apiRequest<{ user: BackendUser }>('/users', {
+        method: 'POST',
+        body,
+      });
+      return mapUser(data.user);
     },
   },
 };
@@ -1042,5 +1272,12 @@ export function resetRealApiCache() {
   zoneIndex.clear();
   spaceIndex.clear();
   reservationQrTokens.clear();
+  if (typeof window !== 'undefined') {
+    try {
+      window.sessionStorage.removeItem(QR_STORAGE_KEY);
+    } catch {
+      // Ignore storage access errors.
+    }
+  }
   listCache = null;
 }

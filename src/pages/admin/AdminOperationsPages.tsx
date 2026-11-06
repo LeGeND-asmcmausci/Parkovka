@@ -20,6 +20,7 @@ import {
   useSessions,
   useUpdateUser,
 } from '@/lib/api/hooks';
+import { USE_FIXTURES } from '@/lib/api';
 import { ApiError } from '@/lib/api/errors';
 import { formatAmount, formatDateTime, formatDuration } from '@/lib/format';
 import { usePageTitle } from '@/hooks/use-page-title';
@@ -865,6 +866,7 @@ type UserFormState = {
   fullName: string;
   email: string;
   phone: string;
+  password: string;
   role: Role;
   facilityIds: string[];
 };
@@ -873,6 +875,7 @@ const emptyUserForm = (role: Role): UserFormState => ({
   fullName: '',
   email: '',
   phone: '',
+  password: '',
   role,
   facilityIds: [],
 });
@@ -920,6 +923,7 @@ function UserManagementPage({ fixedRole }: { fixedRole?: Role }) {
       fullName: user.fullName,
       email: user.email,
       phone: user.phone,
+      password: '',
       role: user.role,
       facilityIds: user.facilityIds ?? [],
     });
@@ -932,6 +936,10 @@ function UserManagementPage({ fixedRole }: { fixedRole?: Role }) {
     setFormError('');
     if (!form.fullName.trim() || !form.email.trim() || !form.phone.trim()) {
       setFormError(t('errors.required'));
+      return;
+    }
+    if (!editing && !USE_FIXTURES && form.password.length < 6) {
+      setFormError(t('errors.passwordLength'));
       return;
     }
     const onError = (error: unknown) =>
@@ -965,6 +973,7 @@ function UserManagementPage({ fixedRole }: { fixedRole?: Role }) {
         fullName: form.fullName.trim(),
         email: form.email.trim().toLowerCase(),
         phone: form.phone.trim(),
+        password: USE_FIXTURES ? undefined : form.password,
         role: form.role,
         facilityIds: form.role === 'GUARD' ? form.facilityIds : undefined,
       },
@@ -1066,36 +1075,40 @@ function UserManagementPage({ fixedRole }: { fixedRole?: Role }) {
       sortValue: (user) => user.createdAt,
       mobileHidden: true,
     },
-    {
-      id: 'actions',
-      header: t('common.actions'),
-      align: 'right',
-      cell: (user) => (
-        <div className="flex items-center justify-end gap-1">
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            aria-label={t('common.edit')}
-            onClick={(event) => {
-              event.stopPropagation();
-              openEdit(user);
-            }}
-          >
-            <UserCog />
-          </Button>
-          <Button
-            variant={user.status === 'ACTIVE' ? 'danger-ghost' : 'ghost'}
-            size="sm"
-            onClick={(event) => {
-              event.stopPropagation();
-              setStatusTarget(user);
-            }}
-          >
-            {user.status === 'ACTIVE' ? t('admin.suspend') : t('admin.activate')}
-          </Button>
-        </div>
-      ),
-    },
+    ...(USE_FIXTURES
+      ? [
+          {
+            id: 'actions',
+            header: t('common.actions'),
+            align: 'right' as const,
+            cell: (user: User) => (
+              <div className="flex items-center justify-end gap-1">
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  aria-label={t('common.edit')}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    openEdit(user);
+                  }}
+                >
+                  <UserCog />
+                </Button>
+                <Button
+                  variant={user.status === 'ACTIVE' ? 'danger-ghost' : 'ghost'}
+                  size="sm"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setStatusTarget(user);
+                  }}
+                >
+                  {user.status === 'ACTIVE' ? t('admin.suspend') : t('admin.activate')}
+                </Button>
+              </div>
+            ),
+          },
+        ]
+      : []),
   ];
 
   const title = fixedRole === 'GUARD' ? t('admin.guardsTitle') : t('admin.usersTitle');
@@ -1129,7 +1142,7 @@ function UserManagementPage({ fixedRole }: { fixedRole?: Role }) {
           columns={columns}
           rowKey={(user) => user.id}
           pageSize={10}
-          onRowClick={openEdit}
+          onRowClick={USE_FIXTURES ? openEdit : undefined}
           searchPlaceholder={`${t('common.search')}…`}
           searchFn={(user, query) =>
             [user.fullName, user.email, user.phone, user.role].join(' ').toLowerCase().includes(query)
@@ -1167,7 +1180,13 @@ function UserManagementPage({ fixedRole }: { fixedRole?: Role }) {
               ? t('admin.addGuard')
               : t('admin.addUser')
         }
-        description={editing ? editing.email : t('auth.demoHint')}
+        description={
+          editing
+            ? editing.email
+            : fixedRole === 'GUARD'
+              ? t('admin.guardsSubtitle')
+              : t('admin.usersSubtitle')
+        }
         footer={
           <>
             <Button variant="outline" onClick={() => setFormOpen(false)} disabled={createUser.isPending || updateUser.isPending}>
@@ -1211,6 +1230,17 @@ function UserManagementPage({ fixedRole }: { fixedRole?: Role }) {
               autoComplete="tel"
             />
           </Field>
+          {!editing && !USE_FIXTURES && (
+            <Field label={t('auth.password')} htmlFor="user-password" hint={t('auth.passwordHint')} required>
+              <Input
+                id="user-password"
+                type="password"
+                value={form.password}
+                onChange={(event) => setForm((current) => ({ ...current, password: event.target.value }))}
+                autoComplete="new-password"
+              />
+            </Field>
+          )}
           <Field label={t('admin.role')} htmlFor="user-role" required>
             <Select
               id="user-role"
@@ -1223,7 +1253,7 @@ function UserManagementPage({ fixedRole }: { fixedRole?: Role }) {
               <option value="ADMIN">{t('auth.roleAdmin')}</option>
             </Select>
           </Field>
-          {form.role === 'GUARD' && (
+          {form.role === 'GUARD' && USE_FIXTURES && (
             <Field label={t('admin.facilities')} hint={t('admin.guardAssigned')}>
               <div className="grid gap-2 rounded-lg border border-border bg-muted/30 p-3 sm:grid-cols-2">
                 {facilities.data.map((facility) => {

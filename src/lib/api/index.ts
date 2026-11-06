@@ -15,6 +15,7 @@ import type {
   ParkingSpace,
   Payment,
   PricingRule,
+  QrVerification,
   Reservation,
   Review,
   Role,
@@ -65,6 +66,11 @@ export const api = {
         () => mock.mockMe(token),
         () => realApi.auth.me(token),
       ),
+    logout: (refreshToken?: string): Promise<void> =>
+      choose(
+        async () => undefined,
+        () => realApi.auth.logout(refreshToken),
+      ),
   },
   profile: {
     update: (userId: string, patch: Partial<Pick<User, 'fullName' | 'phone' | 'email'>>) =>
@@ -78,6 +84,16 @@ export const api = {
       choose(
         () => mock.mockFacilities(params),
         () => realApi.facilities.list(params),
+      ),
+    map: (params: {
+      city?: string;
+      parkingType?: string;
+      bounds?: { north: number; south: number; east: number; west: number };
+      limit?: number;
+    } = {}): Promise<FacilityWithAvailability[]> =>
+      choose(
+        () => mock.mockFacilities({ city: params.city }),
+        () => realApi.facilities.map(params),
       ),
     get: (idOrSlug: string): Promise<FacilityWithAvailability> =>
       choose(
@@ -217,6 +233,11 @@ export const api = {
         () => mock.mockLookupEntry(query),
         () => realApi.sessions.lookup(query),
       ),
+    verifyQr: (qrToken: string): Promise<QrVerification> =>
+      choose(
+        () => mock.mockVerifyQr(qrToken),
+        () => realApi.sessions.verifyQr(qrToken),
+      ),
     checkIn: (input: CheckInInput): Promise<ParkingSession> =>
       choose(
         () => mock.mockCheckIn(input),
@@ -233,6 +254,17 @@ export const api = {
       choose(
         () => mock.mockPayments(filters),
         () => realApi.payments.list(filters),
+      ),
+    create: (input: {
+      reservationId?: string;
+      sessionId?: string;
+      amount?: number;
+      paymentMethod: 'PAYME' | 'CLICK' | 'UZCARD' | 'HUMO' | 'CASH';
+      description?: string;
+    }): Promise<Payment> =>
+      choose(
+        () => mock.mockCreatePayment(input),
+        () => realApi.payments.create(input),
       ),
   },
   reviews: {
@@ -292,10 +324,18 @@ export const api = {
       phone: string;
       role: Role;
       facilityIds?: string[];
+      password?: string;
     }): Promise<User> =>
       choose(
         () => mock.mockCreateUser(input),
-        () => notSupported('Creating an admin user', 'The backend exposes only GET /api/users.'),
+        () =>
+          realApi.admin.createUser({
+            name: input.fullName,
+            email: input.email,
+            password: input.password ?? '',
+            role: input.role,
+            phone: input.phone || undefined,
+          }),
       ),
     updateUser: (id: string, patch: Partial<User>): Promise<User> =>
       choose(

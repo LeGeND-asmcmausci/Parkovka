@@ -15,7 +15,8 @@ import {
 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { useCreateReservation, useFacilities, useFacility, useFloors, useSpaceAvailability, useSpaces, useVehicles, useZones, useCreateVehicle } from '@/lib/api/hooks';
+import { useCreatePayment, useCreateReservation, useFacilities, useFacility, useFloors, useSpaceAvailability, useSpaces, useVehicles, useZones, useCreateVehicle } from '@/lib/api/hooks';
+import { USE_FIXTURES } from '@/lib/api';
 import { ApiError } from '@/lib/api/errors';
 import { formatAmount, formatFullDateTime, formatDuration } from '@/lib/format';
 import { usePageTitle } from '@/hooks/use-page-title';
@@ -83,6 +84,7 @@ export function BookingPage() {
   const [terms, setTerms] = useState(false);
   const [stepsError, setStepsError] = useState('');
   const [created, setCreated] = useState<Reservation | null>(null);
+  const [paymentNotice, setPaymentNotice] = useState('');
   const [vehicleOpen, setVehicleOpen] = useState(false);
   const [vehicleForm, setVehicleForm] = useState({ plate: '', make: '', model: '', color: '', year: '2020' });
   const [vehicleError, setVehicleError] = useState('');
@@ -99,7 +101,12 @@ export function BookingPage() {
   const { data: vehicles = [], isLoading: vehiclesLoading } = useVehicles();
   const availability = useSpaceAvailability(selectedSpace?.id);
   const createReservation = useCreateReservation();
+  const createPayment = useCreatePayment();
   const createVehicle = useCreateVehicle();
+
+  const paymentMethods = USE_FIXTURES
+    ? PAYMENT_METHODS
+    : PAYMENT_METHODS.filter((method) => method.value !== 'UZCARD' && method.value !== 'HUMO');
 
   usePageTitle(t('booking.title'));
 
@@ -231,12 +238,14 @@ export function BookingPage() {
   };
 
   const confirmBooking = async () => {
-    if (!facility || !selectedSpace || !zoneId || !floorId || !vehicleId) return;
+    if (!facility || !selectedSpace || !zoneId || !floorId) return;
+    if (USE_FIXTURES && !vehicleId) return;
     if (!terms) {
       setStepsError(t('errors.termsRequired'));
       return;
     }
     setStepsError('');
+    setPaymentNotice('');
     try {
       const reservation = await createReservation.mutateAsync({
         facilityId: facility.id,
@@ -245,13 +254,29 @@ export function BookingPage() {
         spaceId: selectedSpace.id,
         startsAt: new Date(startsAt).toISOString(),
         endsAt: new Date(endsAt).toISOString(),
-        vehicleId,
+        vehicleId: vehicleId ?? '',
         paymentMethod,
       });
       setCreated(reservation);
       setStep(6);
       toast.success(t('booking.successTitle'));
       window.scrollTo({ top: 0, behavior: 'smooth' });
+
+      if (!USE_FIXTURES && (paymentMethod === 'PAYME' || paymentMethod === 'CLICK')) {
+        try {
+          await createPayment.mutateAsync({
+            reservationId: reservation.id,
+            paymentMethod,
+          });
+          setPaymentNotice(t('booking.paymentPending'));
+        } catch (paymentError) {
+          setPaymentNotice(
+            paymentError instanceof ApiError
+              ? `${t('booking.paymentInitFailed')} ${paymentError.message}`
+              : t('booking.paymentInitFailed'),
+          );
+        }
+      }
     } catch (error) {
       if (error instanceof ApiError && error.code === 'SPACE_UNAVAILABLE') {
         setSelectedSpace(null);
@@ -260,7 +285,7 @@ export function BookingPage() {
       } else if (error instanceof ApiError && error.code === 'PAYMENT_FAILED') {
         setStepsError(t('booking.paymentFailed'));
       } else {
-        setStepsError(t('errors.generic'));
+        setStepsError(error instanceof ApiError ? error.message : t('errors.generic'));
       }
     }
   };
@@ -535,12 +560,20 @@ export function BookingPage() {
               <div>
                 <div className="flex items-center justify-between gap-3">
                   <h2 className="font-display text-lg font-semibold text-foreground">{t('booking.selectVehicle')}</h2>
-                  <Button variant="outline" size="sm" leftIcon={<Plus />} onClick={() => setVehicleOpen(true)}>
-                    {t('booking.addVehicle')}
-                  </Button>
+                  {USE_FIXTURES && (
+                    <Button variant="outline" size="sm" leftIcon={<Plus />} onClick={() => setVehicleOpen(true)}>
+                      {t('booking.addVehicle')}
+                    </Button>
+                  )}
                 </div>
 
-                {vehiclesLoading ? (
+                {!USE_FIXTURES ? (
+                  <div className="mt-5 rounded-xl border border-dashed border-border px-5 py-10 text-center">
+                    <Car className="mx-auto size-8 text-muted-foreground" />
+                    <p className="mt-3 text-sm font-semibold text-foreground">{t('booking.vehicleOptional')}</p>
+                    <p className="mt-1 text-[12px] text-muted-foreground">{t('booking.vehicleOptionalHint')}</p>
+                  </div>
+                ) : vehiclesLoading ? (
                   <div className="flex justify-center py-10">
                     <Spinner />
                   </div>
@@ -632,7 +665,7 @@ export function BookingPage() {
               <div>
                 <h2 className="font-display text-lg font-semibold text-foreground">{t('booking.payWith')}</h2>
                 <div className="mt-4 grid gap-2.5 sm:grid-cols-2">
-                  {PAYMENT_METHODS.map((method) => {
+                  {paymentMethods.map((method) => {
                     const Icon = method.icon;
                     return (
                       <button
@@ -662,7 +695,7 @@ export function BookingPage() {
 
                 <div className="mt-4 flex items-start gap-2.5 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2.5 text-[12px] leading-relaxed text-blue-800 dark:border-blue-500/30 dark:bg-blue-500/10 dark:text-blue-200">
                   <ShieldCheck className="mt-0.5 size-4 shrink-0" />
-                  {t('booking.paymentNote')}
+                  {USE_FIXTURES ? t('booking.paymentNote') : t('booking.paymentNoteReal')}
                 </div>
 
                 <div className="mt-4">
@@ -696,6 +729,11 @@ export function BookingPage() {
                 <div className="mx-auto mt-5 max-w-sm">
                   <TicketCard reservation={created} facility={facility ?? undefined} showActions={false} />
                 </div>
+                {paymentNotice && (
+                  <p className="mx-auto mt-4 max-w-md rounded-lg border border-amber-300/60 bg-amber-50/70 px-3 py-2 text-[12px] font-medium text-amber-900 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200">
+                    {paymentNotice}
+                  </p>
+                )}
                 <div className="mt-5 flex flex-col justify-center gap-2 sm:flex-row">
                   <Button asChild leftIcon={<Ticket />}>
                     <Link to={`/ticket/${created.id}`}>{t('booking.viewTicket')}</Link>

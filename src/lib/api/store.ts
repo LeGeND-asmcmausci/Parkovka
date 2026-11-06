@@ -20,6 +20,7 @@ import type {
   Payment,
   PaymentMethod,
   PricingRule,
+  QrVerification,
   Reservation,
   Review,
   Role,
@@ -1029,6 +1030,83 @@ export async function mockPayments(filters: {
       })
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()),
   );
+}
+
+export async function mockCreatePayment(input: {
+  reservationId?: string;
+  sessionId?: string;
+  amount?: number;
+  paymentMethod: PaymentMethod;
+  description?: string;
+}): Promise<Payment> {
+  await latency();
+  if (input.paymentMethod !== 'CLICK' && input.paymentMethod !== 'PAYME' && input.paymentMethod !== 'CASH') {
+    throw new ApiError('NOT_SUPPORTED', 'Only CLICK, PAYME and CASH are supported.', 501);
+  }
+  const data = db();
+  const reservation = input.reservationId
+    ? data.reservations.find((item) => item.id === input.reservationId)
+    : undefined;
+  const session = input.sessionId
+    ? data.sessions.find((item) => item.id === input.sessionId)
+    : undefined;
+  if (!reservation && !session) {
+    throw new ApiError('NOT_FOUND', 'Payment target not found', 404);
+  }
+  const amount = input.amount ?? reservation?.totalAmount ?? session?.amount ?? 0;
+  if (amount <= 0) throw new ApiError('VALIDATION', 'Payment amount must be positive', 400);
+
+  if (reservation) {
+    reservation.paymentStatus = 'PAID';
+    reservation.paidAmount = amount;
+  }
+  if (session) session.paid = true;
+
+  const payment: Payment = {
+    id: uid('pay'),
+    reference: `PAY-${Date.now().toString().slice(-6)}`,
+    userId: reservation?.userId ?? session?.userId ?? 'usr_demo',
+    reservationId: input.reservationId,
+    sessionId: input.sessionId,
+    facilityId: reservation?.facilityId ?? session?.facilityId ?? '',
+    amount,
+    method: input.paymentMethod,
+    status: 'PAID',
+    createdAt: nowIso(),
+    paidAt: nowIso(),
+  };
+  data.payments.unshift(payment);
+  persist();
+  return clone(payment);
+}
+
+export async function mockVerifyQr(qrToken: string): Promise<QrVerification> {
+  await latency();
+  const token = qrToken.trim().toUpperCase();
+  const data = db();
+  const reservation = data.reservations.find(
+    (item) => item.qrToken.toUpperCase() === token || item.reference.toUpperCase() === token,
+  );
+  if (reservation) {
+    return {
+      valid: true,
+      purpose: 'reservation',
+      facilityId: reservation.facilityId,
+      expiresAt: reservation.endsAt,
+    };
+  }
+  const session = data.sessions.find((item) => item.reference.toUpperCase() === token);
+  if (session) {
+    return {
+      valid: true,
+      purpose: session.status === 'ACTIVE' ? 'exit' : 'entry',
+      parkingSessionId: session.id,
+      sessionStatus: session.status,
+      facilityId: session.facilityId,
+      expiresAt: '',
+    };
+  }
+  throw new ApiError('VALIDATION', 'QR code not recognised', 400);
 }
 
 export async function mockReviews(facilityId: string): Promise<Review[]> {

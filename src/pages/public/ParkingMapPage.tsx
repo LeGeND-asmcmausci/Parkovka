@@ -15,7 +15,7 @@ import {
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { USE_FIXTURES } from '@/lib/api';
-import { useFacilities } from '@/lib/api/hooks';
+import { useFacilityMap } from '@/lib/api/hooks';
 import { useAuth } from '@/lib/auth';
 import { formatAmount } from '@/lib/format';
 import { usePageTitle } from '@/hooks/use-page-title';
@@ -258,7 +258,7 @@ export function ParkingMapPage() {
   const { t, tx, language } = useI18n();
   const toast = useToast();
   const [params, setParams] = useSearchParams();
-  const { data: facilities = [], isLoading, isError, refetch } = useFacilities();
+  const { data: facilities = [], isLoading, isError, refetch } = useFacilityMap();
 
   const [query, setQuery] = useState('');
   const [maxPrice, setMaxPrice] = useState<number | undefined>();

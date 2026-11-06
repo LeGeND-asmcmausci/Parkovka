@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { z } from 'zod';
+import { USE_FIXTURES } from '@/lib/api';
 import { ApiError } from '@/lib/api/errors';
 import { roleHome, useAuth } from '@/lib/auth';
 import { usePageTitle } from '@/hooks/use-page-title';
@@ -159,6 +160,7 @@ export function LoginPage() {
           </Button>
         </form>
 
+        {USE_FIXTURES && (
         <div className="mt-6 rounded-xl border border-border bg-muted/40 p-4">
           <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
             {t('auth.demoTitle')}
@@ -192,6 +194,7 @@ export function LoginPage() {
             })}
           </div>
         </div>
+        )}
 
         <p className="mt-6 text-center text-[13px] text-muted-foreground">
           {t('auth.noAccount')}{' '}

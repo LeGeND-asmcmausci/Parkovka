@@ -32,6 +32,7 @@ import {
   useCreateVehicle,
   useVehicles,
 } from '@/lib/api/hooks';
+import { USE_FIXTURES } from '@/lib/api';
 import { ApiError } from '@/lib/api/errors';
 import { useAuth } from '@/lib/auth';
 import { formatRelative } from '@/lib/format';
@@ -698,6 +699,7 @@ function readPrefs(): DevicePrefs {
 
 export function SettingsPage() {
   const { t, language, setLanguage } = useI18n();
+  const { user } = useAuth();
   const { theme, setTheme } = useTheme();
   const toast = useToast();
   const [prefs, setPrefs] = useState<DevicePrefs>(readPrefs);
@@ -783,7 +785,7 @@ export function SettingsPage() {
               checked={prefs.email}
               onCheckedChange={(checked) => updatePref('email', checked)}
               label={t('user.emailNotifications')}
-              description={t('auth.demoUser')}
+              description={user?.email ?? ''}
             />
             <SwitchField
               id="pref-push"
@@ -800,9 +802,11 @@ export function SettingsPage() {
               description={t('auth.phone')}
             />
           </div>
-          <p className="mt-3 rounded-lg bg-muted/50 px-3 py-2 text-[11px] leading-relaxed text-muted-foreground">
-            {t('common.demoDataNote')}
-          </p>
+          {USE_FIXTURES && (
+            <p className="mt-3 rounded-lg bg-muted/50 px-3 py-2 text-[11px] leading-relaxed text-muted-foreground">
+              {t('common.demoDataNote')}
+            </p>
+          )}
         </section>
       </div>
 

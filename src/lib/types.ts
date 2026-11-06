@@ -326,6 +326,19 @@ export interface CheckOutInput {
   pay: boolean;
   method: PaymentMethod;
   guardId?: string;
+  qrToken?: string;
+  plate?: string;
+}
+
+export type QrPurpose = 'entry' | 'exit' | 'reservation';
+
+export interface QrVerification {
+  valid: boolean;
+  purpose: QrPurpose;
+  parkingSessionId?: string;
+  sessionStatus?: 'ACTIVE' | 'COMPLETED' | 'CANCELLED' | 'EXPIRED';
+  facilityId?: string;
+  expiresAt: string;
 }
 
 export interface CheckOutResult {

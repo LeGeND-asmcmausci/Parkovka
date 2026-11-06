@@ -22,6 +22,7 @@ import { api } from './index';
 
 export const queryKeys = {
   facilities: (params?: FacilitySearchParams) => ['facilities', params ?? {}] as const,
+  facilityMap: (params: Record<string, unknown>) => ['facility-map', params] as const,
   facility: (id: string) => ['facility', id] as const,
   floors: (facilityId: string) => ['floors', facilityId] as const,
   zones: (floorId: string) => ['zones', floorId] as const,
@@ -76,6 +77,22 @@ export function useFacilities(params: FacilitySearchParams = {}) {
   return useQuery({
     queryKey: queryKeys.facilities(params),
     queryFn: () => api.facilities.list(params),
+    staleTime: 20_000,
+  });
+}
+
+/** Facilities that carry real coordinates — the backend excludes the rest. */
+export function useFacilityMap(
+  params: {
+    city?: string;
+    parkingType?: string;
+    bounds?: { north: number; south: number; east: number; west: number };
+    limit?: number;
+  } = {},
+) {
+  return useQuery({
+    queryKey: queryKeys.facilityMap(params),
+    queryFn: () => api.facilities.map(params),
     staleTime: 20_000,
   });
 }
@@ -352,6 +369,26 @@ export function useCheckOut() {
   });
 }
 
+export function useVerifyQr() {
+  return useMutation({
+    mutationFn: (qrToken: string) => api.sessions.verifyQr(qrToken),
+  });
+}
+
+export function useCreatePayment() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: {
+      reservationId?: string;
+      sessionId?: string;
+      amount?: number;
+      paymentMethod: 'PAYME' | 'CLICK' | 'UZCARD' | 'HUMO' | 'CASH';
+      description?: string;
+    }) => api.payments.create(input),
+    onSuccess: () => invalidate(queryClient, ALL_DATA),
+  });
+}
+
 export function useUpdateSpaceStatus() {
   const queryClient = useQueryClient();
   return useMutation({
@@ -419,6 +456,7 @@ export function useCreateAdminUser() {
       phone: string;
       role: Role;
       facilityIds?: string[];
+      password?: string;
     }) => api.admin.createUser(input),
     onSuccess: () => invalidate(queryClient, ['admin-users', 'audit-logs']),
   });

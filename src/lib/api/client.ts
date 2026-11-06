@@ -1,9 +1,19 @@
 import { ApiError, normalizeError } from './errors';
+import { emitAuthExpired, updateSessionTokens, writeSession } from './session-store';
 
 const API_BASE = (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/$/, '');
 const FORCE_FIXTURES = import.meta.env.VITE_USE_FIXTURES === 'true';
+const IS_DEV = Boolean(import.meta.env.DEV);
+const IS_TEST = import.meta.env.MODE === 'test';
 
-export const USE_FIXTURES = FORCE_FIXTURES || !API_BASE;
+/**
+ * Fixture data is allowed only as an explicit development/test mode. A missing
+ * `VITE_API_URL` in a production build never falls back to fake data: requests
+ * fail with NETWORK so the UI shows the real error state.
+ */
+export const USE_FIXTURES = FORCE_FIXTURES || (IS_DEV && !API_BASE) || (IS_TEST && !API_BASE);
+
+export const hasApiBase = Boolean(API_BASE);
 
 interface TokenPair {
   accessToken: string | null;
@@ -56,11 +66,32 @@ function unwrapEnvelope<T>(payload: unknown): T {
   return payload as T;
 }
 
-async function refreshSession() {
-  if (!API_BASE || !tokens.refreshToken) {
-    clearAuthTokens();
-    throw new ApiError('UNAUTHORIZED', 'Session expired', 401);
+function tokenExpiry(token: string | undefined): number {
+  const fallback = Date.now() + 15 * 60_000;
+  if (!token) return fallback;
+  try {
+    const payload = token.split('.')[1];
+    if (!payload) return fallback;
+    const normalized = payload.replace(/-/g, '+').replace(/_/g, '/');
+    const parsed = JSON.parse(atob(normalized)) as { exp?: number };
+    return typeof parsed.exp === 'number' ? parsed.exp * 1000 : fallback;
+  } catch {
+    return fallback;
   }
+}
+
+function failSession(): never {
+  clearAuthTokens();
+  writeSession(null);
+  emitAuthExpired();
+  throw new ApiError('UNAUTHORIZED', 'Session expired', 401);
+}
+
+let refreshInFlight: Promise<void> | null = null;
+
+async function requestRefresh(): Promise<void> {
+  if (!API_BASE || !tokens.refreshToken) failSession();
+
   const response = await fetch(`${API_BASE}/auth/refresh`, {
     method: 'POST',
     headers: {
@@ -68,20 +99,41 @@ async function refreshSession() {
       Authorization: `Bearer ${tokens.refreshToken}`,
     },
   });
-  if (!response.ok) {
-    clearAuthTokens();
-    throw new ApiError('UNAUTHORIZED', 'Session expired', 401);
-  }
+  if (!response.ok) failSession();
+
   const data = unwrapEnvelope<{ accessToken: string; refreshToken?: string }>(
     await response.json(),
   );
   tokens.accessToken = data.accessToken;
   tokens.refreshToken = data.refreshToken ?? tokens.refreshToken;
+  // The backend rotates the refresh token on every refresh; persist the pair so
+  // a page reload does not replay the revoked token.
+  updateSessionTokens({
+    accessToken: data.accessToken,
+    refreshToken: data.refreshToken ?? tokens.refreshToken,
+    expiresAt: tokenExpiry(data.accessToken),
+  });
+}
+
+/** One refresh at a time: concurrent 401s share the same rotation. */
+function refreshSession(): Promise<void> {
+  if (!refreshInFlight) {
+    refreshInFlight = requestRefresh().finally(() => {
+      refreshInFlight = null;
+    });
+  }
+  return refreshInFlight;
 }
 
 export async function apiRequest<T>(path: string, options: RequestOptions = {}): Promise<T> {
   if (!API_BASE) {
-    throw new ApiError('NETWORK', 'VITE_API_URL is not configured', 0);
+    throw new ApiError(
+      'NETWORK',
+      USE_FIXTURES
+        ? 'Fixture mode is active; configure VITE_API_URL to call the backend.'
+        : 'VITE_API_URL is not configured',
+      0,
+    );
   }
 
   const send = async () => {
@@ -120,6 +172,9 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}):
       await refreshSession();
       return send();
     }
+    if (error instanceof ApiError && error.status === 401 && !options.skipRefresh) {
+      failSession();
+    }
     throw normalizeError(error);
   }
 }
@@ -138,6 +193,9 @@ function mapErrorCode(status: number, payload: unknown, path: string): ApiErrorC
     return 'SPACE_UNAVAILABLE';
   }
   if (status === 409 && /exist/i.test(message) && path.includes('/auth/register')) {
+    return 'EMAIL_TAKEN';
+  }
+  if (status === 409 && /exist/i.test(message) && path.includes('/users')) {
     return 'EMAIL_TAKEN';
   }
   if (status === 401) return 'UNAUTHORIZED';

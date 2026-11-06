@@ -1,27 +1,45 @@
 /**
  * JWT authentication utilities for the Smart Parking Management System.
- * 
- * @author Principal Backend Engineer
- * @version 0.1.0
+ *
+ * Access and refresh tokens are explicitly typed (`typ` claim) so a refresh
+ * token can never be used as an access token and vice versa.
+ *
+ * `authenticate` resolves the user from the database on every request: the role
+ * and status in the token are never trusted, so a demoted or suspended account
+ * loses access immediately instead of when its access token expires.
  */
 
 import jwt from "jsonwebtoken";
-import { User } from "../models/user";
+import { prisma } from "./db";
 import { createError, ErrorMessages } from "./http-error";
 
 const JWT_SECRET = process.env.JWT_SECRET || "change-this-to-a-secure-secret-key";
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || "15m";
 const REFRESH_TOKEN_EXPIRES_IN = process.env.REFRESH_TOKEN_EXPIRES_IN || "30d";
 
+export type TokenType = "access" | "refresh";
+
+export interface TokenUser {
+  id: string;
+  email: string;
+  role: string;
+}
+
+export interface TypedJwtPayload extends jwt.JwtPayload {
+  sub: string;
+  typ: TokenType;
+}
+
 /**
  * Generate access token
  */
-export const generateAccessToken = (user: { id: string; email: string; role: string }): string => {
+export const generateAccessToken = (user: TokenUser): string => {
   return jwt.sign(
-    { 
-      sub: user.id, 
-      email: user.email, 
-      role: user.role 
+    {
+      sub: user.id,
+      email: user.email,
+      role: user.role,
+      typ: "access" satisfies TokenType,
     },
     JWT_SECRET,
     { expiresIn: JWT_EXPIRES_IN } as jwt.SignOptions
@@ -29,41 +47,49 @@ export const generateAccessToken = (user: { id: string; email: string; role: str
 };
 
 /**
- * Generate refresh token
+ * Generate refresh token (`jti` lets each session be revoked individually).
  */
-export const generateRefreshToken = (userId: string): string => {
+export const generateRefreshToken = (userId: string, jti: string): string => {
   return jwt.sign(
-    { sub: userId },
+    { sub: userId, jti, typ: "refresh" satisfies TokenType },
     JWT_SECRET,
     { expiresIn: REFRESH_TOKEN_EXPIRES_IN } as jwt.SignOptions
   );
 };
 
+const verifyTypedToken = (token: string, expected: TokenType): TypedJwtPayload => {
+  const payload = jwt.verify(token, JWT_SECRET) as jwt.JwtPayload;
+
+  if (!payload || payload.typ !== expected || typeof payload.sub !== "string") {
+    throw new Error(`Invalid ${expected} token`);
+  }
+
+  return payload as TypedJwtPayload;
+};
+
 /**
  * Verify access token
  */
-export const verifyAccessToken = (token: string): jwt.JwtPayload => {
-  return jwt.verify(token, JWT_SECRET) as jwt.JwtPayload;
-};
+export const verifyAccessToken = (token: string): TypedJwtPayload =>
+  verifyTypedToken(token, "access");
 
 /**
  * Verify refresh token
  */
-export const verifyRefreshToken = (token: string): jwt.JwtPayload => {
-  return jwt.verify(token, JWT_SECRET) as jwt.JwtPayload;
-};
+export const verifyRefreshToken = (token: string): TypedJwtPayload =>
+  verifyTypedToken(token, "refresh");
 
 /**
  * Extract token from Authorization header
  */
 export const extractTokenFromHeader = (header: string | undefined): string | null => {
   if (!header) return null;
-  
+
   const parts = header.split(" ");
-  if (parts.length === 2 && parts[0] === "Bearer") {
+  if (parts.length === 2 && parts[0] === "Bearer" && parts[1]) {
     return parts[1];
   }
-  
+
   return null;
 };
 
@@ -75,76 +101,57 @@ export const authorize = (...allowedRoles: string[]) => {
     if (!req.user || !req.user.role) {
       return next(createError(401, ErrorMessages.UNAUTHORIZED_ACCESS));
     }
-    
+
     if (!allowedRoles.includes(req.user.role)) {
       return next(createError(403, ErrorMessages.FORBIDDEN_ACCESS));
     }
-    
+
     next();
   };
 };
 
 /**
- * Authenticate JWT token middleware
+ * Authenticate JWT token middleware.
+ *
+ * The token only proves identity; role/email/status always come from the DB.
  */
 export const authenticate = async (req: any, res: any, next: any) => {
   try {
-    const authorization = req.headers.authorization;
-    const token = extractTokenFromHeader(authorization);
-    
+    const token = extractTokenFromHeader(req.headers.authorization);
+
     if (!token) {
       return next(createError(401, ErrorMessages.UNAUTHORIZED_ACCESS));
     }
-    
-    const payload = verifyAccessToken(token);
-    
-    // Attach user to request
+
+    let payload: TypedJwtPayload;
+    try {
+      payload = verifyAccessToken(token);
+    } catch {
+      return next(createError(401, ErrorMessages.UNAUTHORIZED_ACCESS));
+    }
+
+    const user = await prisma.user.findUnique({
+      where: { id: payload.sub },
+      select: { id: true, name: true, email: true, role: true, status: true },
+    });
+
+    if (!user) {
+      return next(createError(401, ErrorMessages.UNAUTHORIZED_ACCESS));
+    }
+
+    if (user.status !== "ACTIVE") {
+      return next(createError(403, ErrorMessages.FORBIDDEN_ACCESS));
+    }
+
     req.user = {
-      id: payload.sub,
-      email: payload.email,
-      role: payload.role,
+      id: user.id,
+      name: user.name,
+      email: user.email,
+      role: user.role,
     };
-    
+
     next();
   } catch (error) {
-    next(createError(401, ErrorMessages.UNAUTHORIZED_ACCESS));
-  }
-};
-
-/**
- * Refresh token middleware - for obtaining new access token
- */
-export const refreshAuth = async (req: any, res: any, next: any) => {
-  try {
-    const authorization = req.headers.authorization;
-    const token = extractTokenFromHeader(authorization);
-    
-    if (!token) {
-      return next(createError(401, ErrorMessages.UNAUTHORIZED_ACCESS));
-    }
-    
-    const payload = verifyRefreshToken(token);
-    
-    // Check if refresh token is still valid (not revoked, etc.)
-    // In production, check Redis or database for revoked tokens
-    
-    const user = {
-      id: payload.sub,
-      email: payload.email,
-      role: payload.role,
-    };
-    
-    const newAccessToken = generateAccessToken(user);
-    const newRefreshToken = generateRefreshToken(payload.sub);
-    
-    res.json({
-      success: true,
-      data: {
-        accessToken: newAccessToken,
-        refreshToken: newRefreshToken,
-      },
-    });
-  } catch (error) {
-    next(createError(401, ErrorMessages.UNAUTHORIZED_ACCESS));
+    next(error);
   }
 };

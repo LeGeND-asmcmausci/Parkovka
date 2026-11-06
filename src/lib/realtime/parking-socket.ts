@@ -20,10 +20,10 @@ export interface ParkingAvailabilityUpdatedEvent {
 export type RealtimeStatus = 'off' | 'connecting' | 'connected';
 
 /**
- * The backend (`backend/src/socket.ts`) emits `parking.space:updated` and
- * `parking.availability:updated`; `docs/FRONTEND_API_CONTRACT.md` documents
- * `parking.space.updated` and `parking.availability.updated`. Both spellings
- * plus the task aliases are registered until the contract is reconciled.
+ * `docs/FRONTEND_API_CONTRACT.md` documents `parking:space_updated` and
+ * `parking:availability`. The older dotted/colon spellings are kept as aliases
+ * so a server build that still emits them also updates the UI; only one of the
+ * names is emitted per change, so handlers do not run twice.
  */
 export const PARKING_EVENTS = {
   spaceUpdated: [
@@ -67,19 +67,17 @@ export function connectParkingRealtime(handlers: ParkingRealtimeHandlers) {
   const url = socketUrl();
   if (USE_FIXTURES || !url) return () => undefined;
 
-  const token = getAccessToken();
   const facilityIds = [...new Set(handlers.facilityIds)];
   const socket: Socket = io(url, {
     transports: ['websocket', 'polling'],
     withCredentials: true,
     reconnection: true,
-    auth: token
-      ? {
-          token,
-          userId: handlers.user?.id,
-          role: handlers.user?.role,
-        }
-      : undefined,
+    // The contract accepts only the access token in `auth.token`; it is
+    // re-read on every (re)connect so a rotated token is always current.
+    auth: (cb) => {
+      const current = getAccessToken();
+      cb(current ? { token: current } : {});
+    },
   });
 
   const joinFacilities = () => {
