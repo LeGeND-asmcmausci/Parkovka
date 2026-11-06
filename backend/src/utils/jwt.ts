@@ -7,6 +7,7 @@
 
 import jwt from "jsonwebtoken";
 import { User } from "../models/user";
+import { createError, ErrorMessages } from "./http-error";
 
 const JWT_SECRET = process.env.JWT_SECRET || "change-this-to-a-secure-secret-key";
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || "15m";
@@ -23,7 +24,7 @@ export const generateAccessToken = (user: { id: string; email: string; role: str
       role: user.role 
     },
     JWT_SECRET,
-    { expiresIn: JWT_EXPIRES_IN }
+    { expiresIn: JWT_EXPIRES_IN } as jwt.SignOptions
   );
 };
 
@@ -34,7 +35,7 @@ export const generateRefreshToken = (userId: string): string => {
   return jwt.sign(
     { sub: userId },
     JWT_SECRET,
-    { expiresIn: REFRESH_TOKEN_EXPIRES_IN }
+    { expiresIn: REFRESH_TOKEN_EXPIRES_IN } as jwt.SignOptions
   );
 };
 

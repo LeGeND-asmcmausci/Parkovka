@@ -10,6 +10,7 @@ import { PageSkeleton } from '@/components/ui/states';
 const HomePage = lazy(() => import('@/pages/public/HomePage').then((module) => ({ default: module.HomePage })));
 const SearchPage = lazy(() => import('@/pages/public/SearchPage').then((module) => ({ default: module.SearchPage })));
 const FacilityPage = lazy(() => import('@/pages/public/FacilityPage').then((module) => ({ default: module.FacilityPage })));
+const ParkingMapPage = lazy(() => import('@/pages/public/ParkingMapPage').then((module) => ({ default: module.ParkingMapPage })));
 const LegalPage = lazy(() => import('@/pages/public/LegalPage').then((module) => ({ default: module.LegalPage })));
 const NotFoundPage = lazy(() => import('@/pages/public/NotFoundPage').then((module) => ({ default: module.NotFoundPage })));
 const TicketPage = lazy(() => import('@/pages/public/TicketPage').then((module) => ({ default: module.TicketPage })));
@@ -83,6 +84,7 @@ export function App() {
         <Route element={<PublicLayout />}>
           <Route index element={<Page container><HomePage /></Page>} />
           <Route path="search" element={<Page container><SearchPage /></Page>} />
+          <Route path="map" element={<Page><ParkingMapPage /></Page>} />
           <Route path="facilities/:slug" element={<Page container><FacilityPage /></Page>} />
           <Route path="legal/:kind" element={<Page container><LegalPage /></Page>} />
           <Route path="*" element={<Page container><NotFoundPage /></Page>} />

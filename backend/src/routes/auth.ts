@@ -35,7 +35,7 @@ router.post(
       });
 
       if (existingUser) {
-        return next(createError(409, ErrorCodes.CONFLICT));
+        return next(createError(ErrorCodes.CONFLICT, ErrorMessages.CONFLICT));
       }
 
       // Hash password
@@ -108,16 +108,16 @@ router.post(
       });
 
       if (!user) {
-        return next(createError(401, ErrorCodes.UNAUTHORIZED));
+        return next(createError(ErrorCodes.UNAUTHORIZED, ErrorMessages.UNAUTHORIZED_ACCESS));
       }
 
       const isValid = await bcrypt.compare(password, user.passwordHash);
       if (!isValid) {
-        return next(createError(401, ErrorCodes.UNAUTHORIZED));
+        return next(createError(ErrorCodes.UNAUTHORIZED, ErrorMessages.UNAUTHORIZED_ACCESS));
       }
 
       if (user.status !== "ACTIVE") {
-        return next(createError(403, ErrorCodes.FORBIDDEN));
+        return next(createError(ErrorCodes.FORBIDDEN, ErrorMessages.FORBIDDEN_ACCESS));
       }
 
       const accessToken = generateAccessToken({
@@ -163,7 +163,7 @@ router.post(
       const token = extractTokenFromHeader(authorization);
 
       if (!token) {
-        return next(createError(401, ErrorCodes.UNAUTHORIZED));
+        return next(createError(ErrorCodes.UNAUTHORIZED, ErrorMessages.UNAUTHORIZED_ACCESS));
       }
 
       const payload = verifyRefreshToken(token);
@@ -185,7 +185,7 @@ router.post(
         },
       });
     } catch (error) {
-      next(createError(401, ErrorCodes.UNAUTHORIZED));
+      next(createError(ErrorCodes.UNAUTHORIZED, ErrorMessages.UNAUTHORIZED_ACCESS));
     }
   }
 );
@@ -223,7 +223,7 @@ router.get(
       const userId = req.user?.id;
 
       if (!userId) {
-        return next(createError(404, ErrorCodes.NOT_FOUND));
+        return next(createError(ErrorCodes.NOT_FOUND, ErrorMessages.NOT_FOUND));
       }
 
       const user = await prisma.user.findUnique({
@@ -241,7 +241,7 @@ router.get(
       });
 
       if (!user) {
-        return next(createError(404, ErrorCodes.NOT_FOUND));
+        return next(createError(ErrorCodes.NOT_FOUND, ErrorMessages.NOT_FOUND));
       }
 
       res.json({

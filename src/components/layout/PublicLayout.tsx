@@ -11,6 +11,7 @@ import { LanguageSwitcher, ThemeToggle } from '@/components/ui/preferences';
 const publicLinks = [
   { to: '/', labelKey: 'nav.home', end: true },
   { to: '/search', labelKey: 'nav.search', end: false },
+  { to: '/map', labelKey: 'nav.map', end: false },
   { to: '/#how-it-works', labelKey: 'nav.howItWorks', end: false },
   { to: '/#faq', labelKey: 'footer.faq', end: false },
   { to: '/#contact', labelKey: 'nav.contact', end: false },

@@ -6,6 +6,7 @@
  */
 
 import { createClient } from "redis";
+import logger from "./logger";
 
 let client: any = null;
 

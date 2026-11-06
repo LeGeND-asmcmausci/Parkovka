@@ -4,8 +4,7 @@
 /// @version 0.1.0
 
 generator client {
-  provider      = "postgresql"
-  binaryTargets = ["node@20"]
+  provider = "prisma-client-js"
 }
 
 datasource db {
@@ -99,6 +98,8 @@ model ParkingFacility {
   dailyRate   Int // in UZS, default daily rate
   currency    String         @default("UZS")
   timezone    String         @default("Asia/Tashkent")
+  openingHours String        @default("24/7")
+  parkingType  ParkingType   @default(MULTI_LEVEL)
   createdAt   DateTime       @default(now())
   updatedAt   DateTime       @updatedAt
 
@@ -117,6 +118,13 @@ enum FacilityStatus {
   ACTIVE
   INACTIVE
   MAINTENANCE
+}
+
+enum ParkingType {
+  SURFACE
+  UNDERGROUND
+  MULTI_LEVEL
+  STREET
 }
 
 // --------------------------------------------------------
@@ -219,12 +227,11 @@ model Reservation {
   updatedAt          DateTime  @updatedAt
   Payment            Payment[]
 
-  // Unique constraint: one active reservation per space
-  @@unique([spaceId, status]) // prevent overlapping at DB level via application logic
-  // Indexes
+  // Overlap prevention is enforced in application logic inside a row-locked transaction
   @@index([userId])
   @@index([spaceId])
   @@index([status])
+  @@index([facilityId, status])
 }
 
 enum ReservationStatus {

@@ -7,6 +7,7 @@ import {
   Clock,
   CreditCard,
   MessageSquare,
+  MapPinned,
   Navigation,
   Phone,
   ShieldCheck,
@@ -540,6 +541,9 @@ export function FacilityPage() {
                     onClick={() => window.open(directionsUrl, '_blank', 'noopener,noreferrer')}
                   >
                     {t('facility.directions')}
+                  </Button>
+                  <Button asChild variant="outline" className="w-full justify-start" leftIcon={<MapPinned />}>
+                    <Link to={`/map?facility=${facility.slug}`}>{t('nav.map')}</Link>
                   </Button>
                   <Button
                     variant="outline"

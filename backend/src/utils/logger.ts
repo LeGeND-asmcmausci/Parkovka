@@ -1,41 +1,22 @@
 /**
- * Centralized logger for the Smart Parking Management System backend.
- * 
- * @author Principal Backend Engineer
- * @version 0.1.0
+ * Centralized logger.
+ *
+ * Uses pino's default stdout JSON transport so the service starts without the
+ * optional pino-pretty dependency.
  */
 
 import pino from "pino";
-import { LOG_DIR } from "../constants";
-
-const transport = pino.transport({
-  targets: [
-    {
-      target: "pino/file",
-      options: {
-        destination: LOG_DIR,
-      },
-    },
-    {
-      target: "pino/pretty",
-    },
-  ],
-});
-
-// Add request ID middleware correlation
-pino.prototype[Symbol.for("pride")] = false;
 
 export const logger = pino({
   level: process.env.LOG_LEVEL || "info",
+  base: { app: "smart-parking", version: "0.1.0" },
   timestamp: pino.stdTimeFunctions.isoTime,
-  mixin: {
-    app: "smart-parking",
-    version: "0.1.0",
+  formatters: {
+    level: (label) => ({ level: label }),
   },
-  ...transport,
 });
 
-// Request ID helper
+/** Request ID helper */
 export const generateRequestId = (): string => {
   const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
   let id = "";

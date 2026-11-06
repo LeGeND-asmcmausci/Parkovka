@@ -9,18 +9,6 @@ import { createError, ErrorCodes, ErrorMessages } from "../utils/http-error";
 
 const router = Router();
 
-// Helper: validate request results
-const validate = (req: Request, res: NextFunction, next: any) => {
-  const errors = validationResult(req);
-  if (!errors.isEmpty()) {
-    return res.status(400).json({
-      success: false,
-      message: "Validation failed",
-      errors: errors.array(),
-    });
-  }
-  next();
-};
 
 /**
  * @route GET /api/users/me

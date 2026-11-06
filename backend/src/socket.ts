@@ -1,181 +1,106 @@
-import { Server } from "socket.io";
-import logger from "./utils/logger";
+/**
+ * Socket.IO configuration for live parking map updates.
+ *
+ * - JWT is verified from handshake auth token or Authorization header.
+ * - Anonymous clients may connect read-only (map data is public) and receive
+ *   availability/space events; they cannot mutate anything.
+ * - Clients can only join/leave facility rooms. All state-changing events are
+ *   emitted server-side after successful database transactions.
+ */
 
-// Socket.IO configuration
-export const setupSocketIO = (httpServer) => {
+import type { Server as HttpServer } from "http";
+import { Server, Socket } from "socket.io";
+import logger from "./utils/logger";
+import { extractTokenFromHeader, verifyAccessToken } from "./utils/jwt";
+import { setRealtimeServer } from "./utils/realtime";
+
+const CORS_ORIGIN = process.env.CORS_ORIGIN || "http://localhost:5173";
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+interface SocketUser {
+  id: string;
+  role: string;
+  email?: string;
+}
+
+export const setupSocketIO = (httpServer: HttpServer): Server => {
   const io = new Server(httpServer, {
     cors: {
-      origin: process.env.CORS_ORIGIN || "http://localhost:5173",
+      origin: CORS_ORIGIN,
       methods: ["GET", "POST"],
       credentials: true,
     },
     transports: ["websocket", "polling"],
-    cookie: {
-      name: "parking-session",
-    },
-    allowEIO3: true,
   });
 
-  // Track room membership
-  const roomSessions: Map<string, Set<string>> = new Map(); // roomId -> set of userIds
+  setRealtimeServer(io);
 
-  io.use(async (socket, next) => {
+  io.use((socket: Socket, next) => {
+    const authToken =
+      (socket.handshake.auth && (socket.handshake.auth as Record<string, unknown>).token) as
+        | string
+        | undefined;
+    const headerToken = extractTokenFromHeader(socket.handshake.headers.authorization);
+
+    const token = authToken || headerToken || null;
+
+    // Public map listeners may stay anonymous; they only get read access.
+    if (!token) {
+      socket.data.user = null;
+      return next();
+    }
+
     try {
-      const token = socket.hand.auth?.token;
-      
-      if (!token) {
-        return next(new Error("Authentication required"));
-      }
-      
-      // Verify token
-      let payload: any;
-      try {
-        // In production, use proper JWT verification
-        payload = { 
-          sub: socket.hand.auth?.userId, 
-          role: socket.hand.auth?.role 
-        };
-      } catch (error) {
-        return next(new Error("Invalid authentication token"));
-      }
-      
-      // Attach user to socket
+      const payload = verifyAccessToken(token);
       socket.data.user = {
-        id: payload.sub,
-        role: payload.role,
-      };
-      
-      next();
-    } catch (error) {
-      next(error);
+        id: String(payload.sub),
+        email: typeof payload.email === "string" ? payload.email : undefined,
+        role: String(payload.role),
+      } satisfies SocketUser;
+
+      return next();
+    } catch {
+      return next(new Error("Invalid or expired authentication token"));
     }
   });
 
-  // Event: join parking availability room
-  io.on("connection", (socket) => {
-    const userId = socket.data.user?.id;
-    const userRole = socket.data.user?.role;
+  io.on("connection", (socket: Socket) => {
+    const user = (socket.data.user ?? null) as SocketUser | null;
 
-    logger.info(`Socket.IO client connected: ${socket.id}, user: ${userId}, role: ${userRole}`);
+    // Every connection listens to the public map room.
+    socket.join("map");
 
-    // Join user-specific rooms
-    if (userId) {
-      socket.join(`user:${userId}`);
-    }
-
-    // Guard joins their assigned facilities
-    if (userRole === "GUARD") {
-      // In production, fetch guard's assigned facilities from DB
-      // For now, join general guard room
-      socket.join("guard:all");
-    }
-
-    // User joins general availability room
-    if (userRole === "USER") {
-      socket.join("user:availability");
-    }
-
-    // Facility rooms - admin can join any, guard joins assigned, user joins their favorites
-    socket.on("join:facility", (facilityId: string) => {
-      if (userRole === "ADMIN") {
-        socket.join(`facility:${facilityId}`);
-        logger.info(`Admin ${userId} joined facility room: ${facilityId}`);
-      } else if (userRole === "GUARD") {
-        // Guard can only join assigned facilities
-        socket.join(`facility:${facilityId}`);
-        logger.info(`Guard ${userId} joined facility room: ${facilityId}`);
-      } else if (userRole === "USER") {
-        socket.join(`facility:${facilityId}`);
+    if (user) {
+      socket.join(`user:${user.id}`);
+      if (user.role === "GUARD" || user.role === "ADMIN") {
+        socket.join("staff");
       }
+    }
+
+    logger.info(
+      `Socket.IO connected: ${socket.id} (${user ? `${user.role}:${user.id}` : "anonymous"})`
+    );
+
+    socket.on("join:facility", (facilityId: unknown) => {
+      if (typeof facilityId !== "string" || !UUID_PATTERN.test(facilityId)) {
+        socket.emit("error", { message: "Invalid facility ID" });
+        return;
+      }
+      socket.join(`facility:${facilityId}`);
     });
 
-    // Event: leave facility room
-    socket.on("leave:facility", (facilityId: string) => {
+    socket.on("leave:facility", (facilityId: unknown) => {
+      if (typeof facilityId !== "string" || !UUID_PATTERN.test(facilityId)) return;
       socket.leave(`facility:${facilityId}`);
     });
 
-    // Event: parking space updated
-    socket.on("parking:space:updated", ({ facilityId, spaceId, status }) => {
-      // Broadcast to facility room
-      io.to(`facility:${facilityId}`).emit("parking.space:updated", {
-        facilityId,
-        spaceId,
-        status,
-        timestamp: new Date().toISOString(),
-      });
-    });
-
-    // Event: availability updated
-    socket.on("parking:availability:updated", ({ facilityId }) => {
-      io.to(`facility:${facilityId}`).emit("parking.availability:updated", {
-        facilityId,
-        timestamp: new Date().toISOString(),
-      });
-    });
-
-    // Event: reservation created
-    socket.on("reservation:created", ({ reservationId, facilityId }) => {
-      io.to(`facility:${facilityId}`).emit("reservation:created", {
-        reservationId,
-        facilityId,
-        timestamp: new Date().toISOString(),
-      });
-    });
-
-    // Event: reservation cancelled
-    socket.on("reservation:cancelled", ({ reservationId, facilityId }) => {
-      io.to(`facility:${facilityId}`).emit("reservation:cancelled", {
-        reservationId,
-        facilityId,
-        timestamp: new Date().toISOString(),
-      });
-    });
-
-    // Event: session started
-    socket.on("session:started", ({ sessionId, facilityId }) => {
-      io.to(`facility:${facilityId}`).emit("session:started", {
-        sessionId,
-        facilityId,
-        timestamp: new Date().toISOString(),
-      });
-    });
-
-    // Event: session completed
-    socket.on("session:completed", ({ sessionId, facilityId }) => {
-      io.to(`facility:${facilityId}`).emit("session:completed", {
-        sessionId,
-        facilityId,
-        timestamp: new Date().toISOString(),
-      });
-    });
-
-    // Event: payment completed
-    socket.on("payment:completed", ({ paymentId, facilityId }) => {
-      io.to(`facility:${facilityId}`).emit("payment:completed", {
-        paymentId,
-        facilityId,
-        timestamp: new Date().toISOString(),
-      });
-    });
-
-    // Event: notification created
-    socket.on("notification:created", ({ userId, title, message }) => {
-      io.to(`user:${userId}`).emit("notification:created", {
-        userId,
-        title,
-        message,
-        timestamp: new Date().toISOString(),
-      });
-    });
-
-    // Disconnect
     socket.on("disconnect", () => {
-      logger.info(`Socket.IO client disconnected: ${socket.id}`);
-      if (userId) {
-        socket.leave(`user:${userId}`);
-      }
+      logger.info(`Socket.IO disconnected: ${socket.id}`);
     });
   });
 
   return io;
 };
+
+export default setupSocketIO;

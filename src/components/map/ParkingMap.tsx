@@ -21,9 +21,9 @@ const STATUS_CLASSES: Record<
     dot: 'bg-rose-500',
   },
   RESERVED: {
-    shape: 'fill-amber-50 stroke-amber-500 dark:fill-amber-500/15 dark:stroke-amber-400',
-    text: 'fill-amber-800 dark:fill-amber-300',
-    dot: 'bg-amber-500',
+    shape: 'fill-sky-50 stroke-sky-500 dark:fill-sky-500/15 dark:stroke-sky-400',
+    text: 'fill-sky-800 dark:fill-sky-300',
+    dot: 'bg-sky-500',
   },
   BLOCKED: {
     shape: 'fill-ink-100 stroke-ink-400 dark:fill-white/5 dark:stroke-white/25',
@@ -31,9 +31,9 @@ const STATUS_CLASSES: Record<
     dot: 'bg-ink-400',
   },
   MAINTENANCE: {
-    shape: 'fill-violet-50 stroke-violet-400 dark:fill-violet-500/15 dark:stroke-violet-400',
-    text: 'fill-violet-700 dark:fill-violet-300',
-    dot: 'bg-violet-400',
+    shape: 'fill-ink-100 stroke-ink-400 dark:fill-white/5 dark:stroke-white/25',
+    text: 'fill-ink-500 dark:fill-white/40',
+    dot: 'bg-ink-400',
   },
 };
 

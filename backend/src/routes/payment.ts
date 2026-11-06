@@ -5,23 +5,10 @@ import { authenticate, authorize } from "../utils/jwt";
 import { PrismaClient } from "@prisma/client"
 const prisma = new PrismaClient()
 import { createError, ErrorCodes, ErrorMessages } from "../utils/http-error";
-import { cacheAvailability, invalidateRateLimit } from "../utils/redis";
 import crypto from "crypto";
 
 const router = Router();
 
-// Helper: validate request results
-const validate = (req: Request, res: NextFunction, next: any) => {
-  const errors = validationResult(req);
-  if (!errors.isEmpty()) {
-    return res.status(400).json({
-      success: false,
-      message: "Validation failed",
-      errors: errors.array(),
-    });
-  }
-  next();
-};
 
 /**
  * @route POST /api/payments
@@ -84,7 +71,10 @@ router.post(
       }
 
       // Use the session/reservation price if amount not specified
-      const finalAmount = amount || paymentTarget.priceCents || 0;
+      const finalAmount =
+        amount ||
+        ("priceCents" in paymentTarget ? paymentTarget.priceCents : paymentTarget.finalPriceCents) ||
+        0;
 
       if (finalAmount <= 0) {
         return next(createError(400, "Amount must be greater than zero"));

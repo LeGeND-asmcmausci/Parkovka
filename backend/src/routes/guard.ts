@@ -1,31 +1,20 @@
 import { Router, Request, Response, NextFunction } from "express";
-import { body, param, validationResult } from "express-validator";
+import { body, query } from "express-validator";
+import crypto from "crypto";
 import { validate } from "../middleware/validation";
 import { authenticate, authorize } from "../utils/jwt";
-import { PrismaClient } from "@prisma/client"
-const prisma = new PrismaClient()
+import { prisma } from "../utils/db";
 import { createError, ErrorCodes, ErrorMessages } from "../utils/http-error";
-import { cacheAvailability, invalidateCache, trackSession, getSessionData } from "../utils/redis";
-import crypto from "crypto";
+import { emitAvailabilityForFacility, emitSpaceUpdated } from "../utils/realtime";
 
 const router = Router();
 
-// Helper: validate request results
-const validate = (req: Request, res: NextFunction, next: any) => {
-  const errors = validationResult(req);
-  if (!errors.isEmpty()) {
-    return res.status(400).json({
-      success: false,
-      message: "Validation failed",
-      errors: errors.array(),
-    });
-  }
-  next();
-};
+const hashQrToken = (token: string): string =>
+  crypto.createHash("sha256").update(token).digest("hex");
 
 /**
  * @route POST /api/guard/entry
- * @desc Guard vehicle entry (walk-in or recognized)
+ * @desc Guard vehicle entry (walk-in). Space assignment is atomic.
  * @access Private - Guard
  */
 router.post(
@@ -42,208 +31,158 @@ router.post(
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { facilityId, vehicleId, licensePlate, zoneId } = req.body;
-      const guardId = req.user?.id;
 
-      // If license plate provided, try to find or create vehicle
-      let vehicle;
-      if (licensePlate) {
-        vehicle = await prisma.vehicle.findUnique({
-          where: { plateNumber: licensePlate },
+      if (!vehicleId && !licensePlate) {
+        return next(createError(400, "Either vehicleId or licensePlate is required"));
+      }
+
+      let resolvedFacilityId: string | undefined = facilityId;
+
+      if (!resolvedFacilityId && zoneId) {
+        const zone = await prisma.parkingZone.findUnique({
+          where: { id: zoneId },
+          select: { floor: { select: { facilityId: true } } },
         });
+        if (!zone) {
+          return next(createError(404, ErrorMessages.NOT_FOUND));
+        }
+        resolvedFacilityId = zone.floor.facilityId;
+      }
 
-        if (!vehicle) {
-          // Create vehicle as guest (no user account)
-          vehicle = await prisma.vehicle.create({
-            data: {
+      if (!resolvedFacilityId) {
+        return next(createError(400, "facilityId or zoneId is required"));
+      }
+
+      const targetFacilityId: string = resolvedFacilityId;
+
+      const facility = await prisma.parkingFacility.findUnique({
+        where: { id: targetFacilityId },
+        select: { id: true, hourlyRate: true, currency: true, status: true },
+      });
+
+      if (!facility) {
+        return next(createError(404, ErrorMessages.NOT_FOUND));
+      }
+      if (facility.status !== "ACTIVE") {
+        return next(createError(400, "Facility is not accepting vehicles"));
+      }
+
+      const result = await prisma.$transaction(async (tx) => {
+        let vehicle;
+
+        if (vehicleId) {
+          vehicle = await tx.vehicle.findUnique({ where: { id: vehicleId } });
+          if (!vehicle) {
+            throw createError(404, ErrorMessages.NOT_FOUND);
+          }
+        } else {
+          vehicle = await tx.vehicle.upsert({
+            where: { plateNumber: licensePlate },
+            update: {},
+            create: {
               plateNumber: licensePlate,
               plateRegion: "Tashkent",
               vehicleType: "car",
             },
           });
         }
-      }
 
-      // If facilityId provided, validate it
-      let targetFacility;
-      if (facilityId) {
-        targetFacility = await prisma.parkingFacility.findUnique({
-          where: { id: facilityId },
-        });
+        // Row-level lock; SKIP LOCKED keeps concurrent guards from taking the same space.
+        const locked = zoneId
+          ? await tx.$queryRaw<Array<{ id: string }>>`
+              SELECT "id" FROM "ParkingSpace"
+              WHERE "facilityId" = ${targetFacilityId}
+                AND "zoneId" = ${zoneId}
+                AND "status" = 'AVAILABLE'
+              ORDER BY "spaceNumber" ASC
+              LIMIT 1
+              FOR UPDATE SKIP LOCKED
+            `
+          : await tx.$queryRaw<Array<{ id: string }>>`
+              SELECT "id" FROM "ParkingSpace"
+              WHERE "facilityId" = ${targetFacilityId}
+                AND "status" = 'AVAILABLE'
+              ORDER BY "floorId" ASC, "spaceNumber" ASC
+              LIMIT 1
+              FOR UPDATE SKIP LOCKED
+            `;
 
-        if (!targetFacility) {
-          return next(createError(404, ErrorMessages.NOT_FOUND));
+        if (locked.length === 0) {
+          throw createError(ErrorCodes.CONFLICT, "No available parking space in this facility");
         }
-      }
 
-      // If zoneId provided, validate it
-      let targetZone;
-      if (zoneId) {
-        targetZone = await prisma.ParkingZone.findUnique({
-          where: { id: zoneId },
-        });
+        const space = await tx.parkingSpace.findUnique({ where: { id: locked[0].id } });
 
-        if (!targetZone) {
-          return next(createError(404, ErrorMessages.NOT_FOUND));
+        if (!space) {
+          throw createError(404, ErrorMessages.NOT_FOUND);
         }
-      }
 
-      // Find an available space with proper locking
-      let space;
+        const now = new Date();
+        const expectedExit = new Date(now.getTime() + 4 * 60 * 60 * 1000);
+        const pricePerHour = space.pricePerHour || facility.hourlyRate;
+        const basePriceCents = Math.max(pricePerHour * 4 * 100, pricePerHour * 100);
 
-      if (zoneId) {
-        // Try to find available space in specific zone
-        space = await prisma.parkingSpace.findFirst({
-          where: {
-            zoneId,
-            status: "AVAILABLE",
-          },
-          lock: { mode: "update" },
-        });
-      } else if (facilityId) {
-        // Try to find any available space in facility
-        space = await prisma.parkingSpace.findFirst({
-          where: {
-            facilityId,
-            status: "AVAILABLE",
-          },
-          lock: { mode: "update" },
-        });
-      } else {
-        // Try to find any available space
-        space = await prisma.parkingSpace.findFirst({
-          where: { status: "AVAILABLE" },
-          lock: { mode: "update" },
-        });
-      }
-
-      if (!space) {
-        return next(createError(409, ErrorCodes.RESERVATION_CONFLICT));
-      }
-
-      // Mark space as RESERVED_HELD (temporarily held for walk-in)
-      await prisma.parkingSpace.update({
-        where: { id: space.id },
-        data: { status: "RESERVED_HELD" },
-      });
-
-      // Calculate estimated duration and price
-      const now = new Date();
-      const expectedExit = new Date(now.getTime() + 4 * 60 * 60 * 1000); // 4 hours
-
-      // Calculate price based on zone and facility pricing
-      let pricePerHour = space.pricePerHour;
-      let pricePerDay = space.pricePerDay;
-
-      // Fall back to zone pricing, then facility pricing
-      if (!pricePerHour && targetZone) {
-        const zonePricing = await prisma.PricingRule.findFirst({
-          where: {
-            zoneId: targetZone.id,
-            ruleType: "HOURLY",
-            isActive: true,
+        const session = await tx.parkingSession.create({
+          data: {
+            userId: null,
+            vehicleId: vehicle.id,
+            spaceId: space.id,
+            facilityId: targetFacilityId as string,
+            entryTime: now,
+            expectedExit,
+            status: "ACTIVE",
+            basePriceCents,
+            finalPriceCents: basePriceCents,
+            currency: facility.currency || "UZS",
           },
         });
-        pricePerHour = zonePricing?.hourlyRate;
-      }
 
-      if (!pricePerHour && space.zone?.zoneType) {
-        const zonePricing = await prisma.PricingRule.findFirst({
-          where: {
-            zoneId: space.zone.id,
-            ruleType: "HOURLY",
-            isActive: true,
+        const qrToken = crypto.randomBytes(32).toString("hex");
+
+        await tx.qrCodeTicket.create({
+          data: {
+            qrToken,
+            qrTokenHash: hashQrToken(qrToken),
+            purpose: "entry",
+            parkingSessionId: session.id,
+            expiresAt: new Date(now.getTime() + 2 * 60 * 60 * 1000),
+            status: "ACTIVE",
           },
         });
-        pricePerHour = zonePricing?.hourlyRate;
-      }
 
-      if (!pricePerHour) {
-        pricePerHour = targetFacility?.hourlyRate || 5000;
-      }
+        await tx.parkingSpace.update({
+          where: { id: space.id },
+          data: { status: "OCCUPIED" },
+        });
 
-      if (!pricePerDay) {
-        pricePerDay = targetFacility?.dailyRate || 50000;
-      }
-
-      // Calculate base price for estimated 4 hours
-      const estimatedHours = 4;
-      let basePriceCents = estimatedHours * pricePerHour * 100;
-
-      // Ensure minimum charge
-      if (basePriceCents < pricePerHour * 100) {
-        basePriceCents = pricePerHour * 100;
-      }
-
-      // Create parking session
-      const session = await prisma.parkingSession.create({
-        data: {
-          userId: null,
-          vehicleId: vehicle.id,
-          spaceId: space.id,
-          facilityId: targetFacility?.id || space.facilityId,
-          entryTime: now,
-          expectedExit,
-          status: "ACTIVE",
-          basePriceCents,
-          finalPriceCents: basePriceCents,
-          currency: "UZS",
-        },
-        include: {
-          space: {
-            include: {
-              zone: true,
-              floor: true,
-              facility: true,
-            },
-          },
-          vehicle: true,
-        },
+        return { session, qrToken, space, basePriceCents, expectedExit };
       });
 
-      // Generate QR ticket for entry
-      const qrToken = crypto.randomBytes(32).toString("hex");
-      const qrTokenHash = await prisma.$executeRaw`SELECT bcrypt_hash(?, 12)`; // placeholder - in production use bcrypt
-
-      await prisma.QrCodeTicket.create({
-        data: {
-          qrToken,
-          qrTokenHash: qrToken, // simplified for now
-          purpose: "entry",
-          parkingSessionId: session.id,
-          expiresAt: new Date(Date.now() + 2 * 60 * 60 * 1000),
-          status: "ACTIVE",
-        },
+      emitSpaceUpdated({
+        facilityId: targetFacilityId,
+        spaceId: result.space.id,
+        spaceNumber: result.space.spaceNumber,
+        status: "OCCUPIED",
+        previousStatus: "AVAILABLE",
+        floorId: result.space.floorId,
+        zoneId: result.space.zoneId,
+        reason: "CHECK_IN",
       });
-
-      // Update space status to OCCUPIED
-      await prisma.parkingSpace.update({
-        where: { id: space.id },
-        data: { status: "OCCUPIED" },
-      });
-
-      // Invalidate availability cache
-      invalidateCache(`availability:${targetFacility?.id || space.facilityId}`);
-
-      // Track session in Redis
-      await trackSession(session.id, {
-        vehicleId: vehicle.id,
-        plateNumber: licensePlate || "",
-        entryTime: now,
-      });
+      await emitAvailabilityForFacility(targetFacilityId);
 
       res.json({
         success: true,
         data: {
-          session,
-          qrToken,
+          session: result.session,
+          qrToken: result.qrToken,
           space: {
-            id: space.id,
-            spaceNumber: space.spaceNumber,
-            zone: space.zone?.zoneCode,
-            floor: space.floor?.level,
+            id: result.space.id,
+            spaceNumber: result.space.spaceNumber,
+            zone: result.space.zoneName,
+            floor: result.space.level,
           },
-          estimatedPrice: basePriceCents,
-          estimatedExit: expectedExit,
+          estimatedPrice: result.basePriceCents,
+          estimatedExit: result.expectedExit,
         },
         message: "Vehicle entry recorded successfully",
       });
@@ -255,7 +194,7 @@ router.post(
 
 /**
  * @route POST /api/guard/exit
- * @desc Guard vehicle exit
+ * @desc Guard vehicle exit. Session is completed atomically.
  * @access Private - Guard
  */
 router.post(
@@ -263,8 +202,8 @@ router.post(
   authenticate,
   authorize("GUARD"),
   [
-    body("qrToken").optional().trim().notEmpty().withMessage("QR token required"),
-    body("licensePlate").optional().trim().notEmpty().withMessage("License plate required"),
+    body("qrToken").optional().trim().notEmpty().withMessage("QR token cannot be empty"),
+    body("licensePlate").optional().trim().notEmpty().withMessage("License plate cannot be empty"),
     body("spaceId").optional().isUUID().withMessage("Invalid space ID"),
     body("plateSearch").optional().trim().notEmpty().withMessage("License plate for search required"),
   ],
@@ -273,124 +212,157 @@ router.post(
     try {
       const { qrToken, licensePlate, spaceId, plateSearch } = req.body;
 
-      // Determine which method to use for session lookup
-      let session;
+      const result = await prisma.$transaction(async (tx) => {
+        let ticket: { id: string; status: string; expiresAt: Date; parkingSessionId: string | null } | null = null;
+        let sessionId: string | null = null;
 
-      if (qrToken) {
-        // Find the parking session by QR token
-        session = await prisma.parkingSession.findFirst({
-          where: {
-            // In production, would look up via QR ticket
-            id: "placeholder-session-id",
-          },
-          include: {
-            space: true,
-            vehicle: true,
-            facility: true,
-          },
-        });
+        if (qrToken) {
+          ticket = await tx.qrCodeTicket.findUnique({
+            where: { qrToken },
+            select: { id: true, status: true, expiresAt: true, parkingSessionId: true },
+          });
 
-        if (!session || session.status !== "ACTIVE") {
-          return next(createError(404, ErrorMessages.NOT_FOUND));
-        }
-      } else if (licensePlate || plateSearch) {
-        const plate = licensePlate || plateSearch;
-
-        session = await prisma.parkingSession.findFirst({
-          where: {
-            vehicle: { plateNumber: plate },
-            status: "ACTIVE",
-          },
-          include: {
-            space: true,
-            vehicle: true,
-            facility: true,
-          },
-        });
-
-        if (!session) {
-          return next(createError(404, ErrorMessages.NOT_FOUND));
-        }
-      } else if (spaceId) {
-        session = await prisma.parkingSession.findFirst({
-          where: {
-            spaceId: spaceId,
-            status: "ACTIVE",
-          },
-          include: {
-            space: true,
-            vehicle: true,
-            facility: true,
-          },
-        });
-
-        if (!session) {
-          return next(createError(404, ErrorMessages.NOT_FOUND));
-        }
-      } else {
-        return next(createError(400, "Either QR token, license plate, or space ID required"));
-      }
-
-      if (!session) {
-        return next(createError(404, ErrorMessages.NOT_FOUND));
-      }
-
-      // Calculate final price
-      const now = new Date();
-      const durationMinutes = Math.round((now.getTime() - session.entryTime.getTime()) / (1000 * 60));
-      const durationHours = Math.ceil(durationMinutes / 60);
-
-      let finalPriceCents = session.finalPriceCents;
-
-      if (!finalPriceCents || finalPriceCents === 0) {
-        const pricePerHour = session.space?.pricePerHour || session.facility?.hourlyRate || 5000;
-        const pricePerDay = session.space?.pricePerDay || session.facility?.dailyRate || 50000;
-
-        if (durationHours <= 24) {
-          finalPriceCents = durationHours * pricePerHour * 100;
+          if (!ticket) {
+            throw createError(400, ErrorMessages.QR_CODE_INVALID);
+          }
+          if (ticket.status === "USED") {
+            throw createError(ErrorCodes.CONFLICT, ErrorMessages.QR_CODE_USED);
+          }
+          if (ticket.status === "REVOKED") {
+            throw createError(403, "This QR ticket has been revoked");
+          }
+          if (ticket.status === "EXPIRED" || ticket.expiresAt < new Date()) {
+            throw createError(ErrorCodes.CONFLICT, "QR ticket has expired");
+          }
+          if (!ticket.parkingSessionId) {
+            throw createError(400, "QR ticket is not linked to a parking session");
+          }
+          sessionId = ticket.parkingSessionId;
+        } else if (licensePlate || plateSearch) {
+          const plate = licensePlate || plateSearch;
+          const session = await tx.parkingSession.findFirst({
+            where: { vehicle: { plateNumber: plate }, status: "ACTIVE" },
+            select: { id: true },
+            orderBy: { entryTime: "desc" },
+          });
+          if (!session) {
+            throw createError(404, "No active parking session for this vehicle");
+          }
+          sessionId = session.id;
+        } else if (spaceId) {
+          const session = await tx.parkingSession.findFirst({
+            where: { spaceId, status: "ACTIVE" },
+            select: { id: true },
+            orderBy: { entryTime: "desc" },
+          });
+          if (!session) {
+            throw createError(404, "No active parking session for this space");
+          }
+          sessionId = session.id;
         } else {
-          const dailyCount = Math.ceil(durationHours / 24);
-          finalPriceCents = dailyCount * pricePerDay * 100;
+          throw createError(400, "Either qrToken, licensePlate, plateSearch or spaceId is required");
         }
 
-        await prisma.parkingSession.update({
-          where: { id: session.id },
-          data: { finalPriceCents },
+        // Lock the session so a double exit cannot double-charge.
+        const locked = await tx.$queryRaw<Array<{ id: string }>>`
+          SELECT "id" FROM "ParkingSession"
+          WHERE "id" = ${sessionId} AND "status" = 'ACTIVE'
+          FOR UPDATE
+        `;
+
+        if (locked.length === 0) {
+          throw createError(404, "Active parking session not found");
+        }
+
+        const session = await tx.parkingSession.findUnique({
+          where: { id: sessionId as string },
+          include: { space: true, facility: true },
         });
-      }
 
-      // Update space status to AVAILABLE
-      await prisma.parkingSpace.update({
-        where: { id: session.spaceId },
-        data: { status: "AVAILABLE" },
+        if (!session) {
+          throw createError(404, "Parking session not found");
+        }
+
+        if (ticket) {
+          await tx.qrCodeTicket.update({
+            where: { id: ticket.id },
+            data: { status: "USED", usedAt: new Date() },
+          });
+        }
+
+        const now = new Date();
+        const durationMinutes = Math.max(
+          1,
+          Math.round((now.getTime() - session.entryTime.getTime()) / (1000 * 60))
+        );
+        const durationHours = Math.ceil(durationMinutes / 60);
+
+        const pricePerHour = session.space.pricePerHour || session.facility.hourlyRate;
+        const pricePerDay = session.space.pricePerDay || session.facility.dailyRate;
+
+        let finalPriceCents =
+          durationHours <= 24
+            ? durationHours * pricePerHour * 100
+            : Math.ceil(durationHours / 24) * pricePerDay * 100;
+
+        if (durationHours <= 24 && pricePerDay > 0) {
+          finalPriceCents = Math.min(finalPriceCents, pricePerDay * 100);
+        }
+        finalPriceCents = Math.max(finalPriceCents, pricePerHour * 100);
+
+        const updatedSession = await tx.parkingSession.update({
+          where: { id: session.id },
+          data: {
+            status: "COMPLETED",
+            actualExitTime: now,
+            durationMinutes,
+            finalPriceCents,
+          },
+        });
+
+        // A future confirmed reservation keeps the space reserved after checkout.
+        const upcomingReservations = await tx.reservation.count({
+          where: { spaceId: session.spaceId, status: "CONFIRMED", endTime: { gt: now } },
+        });
+        const nextStatus = upcomingReservations > 0 ? "RESERVED" : "AVAILABLE";
+
+        await tx.parkingSpace.update({
+          where: { id: session.spaceId },
+          data: { status: nextStatus },
+        });
+
+        return {
+          updatedSession,
+          finalPriceCents,
+          durationMinutes,
+          nextStatus,
+          space: session.space,
+          facilityId: session.facilityId,
+        };
       });
 
-      // Invalidate availability cache
-      invalidateCache(`availability:${session.facilityId}`);
-
-      // Generate exit QR code
-      const exitQrToken = crypto.randomBytes(32).toString("hex");
-
-      await prisma.QrCodeTicket.create({
-        data: {
-          qrToken: exitQrToken,
-          purpose: "exit",
-          parkingSessionId: session.id,
-          expiresAt: new Date(Date.now() + 1 * 60 * 60 * 1000),
-          status: "ACTIVE",
-        },
+      emitSpaceUpdated({
+        facilityId: result.facilityId,
+        spaceId: result.space.id,
+        spaceNumber: result.space.spaceNumber,
+        status: result.nextStatus,
+        previousStatus: "OCCUPIED",
+        floorId: result.space.floorId,
+        zoneId: result.space.zoneId,
+        reason: "CHECK_OUT",
       });
+      await emitAvailabilityForFacility(result.facilityId);
 
       res.json({
         success: true,
         data: {
-          session,
-          finalPriceCents,
-          durationMinutes,
-          exitQrToken,
+          session: result.updatedSession,
+          finalPriceCents: result.finalPriceCents,
+          durationMinutes: result.durationMinutes,
           space: {
-            id: session.spaceId,
-            spaceNumber: session.space?.spaceNumber,
+            id: result.space.id,
+            spaceNumber: result.space.spaceNumber,
+            status: result.nextStatus,
           },
         },
         message: "Vehicle exit recorded successfully",
@@ -403,28 +375,50 @@ router.post(
 
 /**
  * @route POST /api/guard/verify-qr
- * @desc Verify QR code for entry/exit
+ * @desc Validate a QR ticket without consuming it
  * @access Private - Guard
  */
 router.post(
   "/verify-qr",
   authenticate,
   authorize("GUARD"),
-  [
-    body("qrToken").trim().notEmpty().withMessage("QR token required"),
-  ],
+  [body("qrToken").trim().notEmpty().withMessage("QR token required")],
   validate,
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const { qrToken } = req.body;
 
+      const ticket = await prisma.qrCodeTicket.findUnique({
+        where: { qrToken },
+        include: {
+          parkingSession: {
+            select: { id: true, status: true, spaceId: true, facilityId: true },
+          },
+        },
+      });
+
+      if (!ticket) {
+        return next(createError(400, ErrorMessages.QR_CODE_INVALID));
+      }
+      if (ticket.status === "USED") {
+        return next(createError(ErrorCodes.CONFLICT, ErrorMessages.QR_CODE_USED));
+      }
+      if (ticket.status === "REVOKED") {
+        return next(createError(403, "This QR ticket has been revoked"));
+      }
+      if (ticket.status === "EXPIRED" || ticket.expiresAt < new Date()) {
+        return next(createError(ErrorCodes.CONFLICT, "QR ticket has expired"));
+      }
+
       res.json({
         success: true,
         data: {
           valid: true,
-          purpose: "entry",
-          parkingSessionId: "placeholder",
-          expiresAt: new Date(Date.now() + 2 * 60 * 60 * 1000),
+          purpose: ticket.purpose,
+          parkingSessionId: ticket.parkingSessionId,
+          sessionStatus: ticket.parkingSession?.status ?? null,
+          facilityId: ticket.parkingSession?.facilityId ?? null,
+          expiresAt: ticket.expiresAt,
         },
         message: "QR code verified successfully",
       });
@@ -436,26 +430,35 @@ router.post(
 
 /**
  * @route GET /api/guard/sessions
- * @desc Get guard's active sessions
+ * @desc Active parking sessions, optionally filtered by facility
  * @access Private - Guard
  */
 router.get(
   "/sessions",
   authenticate,
   authorize("GUARD"),
+  [query("facilityId").optional().isUUID().withMessage("Invalid facility ID")],
+  validate,
   async (req: Request, res: Response, next: NextFunction) => {
     try {
+      const facilityId = typeof req.query.facilityId === "string" ? req.query.facilityId : undefined;
+
       const sessions = await prisma.parkingSession.findMany({
-        where: { status: "ACTIVE" },
+        where: {
+          status: "ACTIVE",
+          ...(facilityId ? { facilityId } : {}),
+        },
         include: {
           space: {
-            include: {
-              zone: true,
-              floor: true,
-              facility: true,
+            select: {
+              id: true,
+              spaceNumber: true,
+              level: true,
+              zoneName: true,
             },
           },
           vehicle: true,
+          facility: { select: { id: true, name: true } },
         },
         orderBy: { entryTime: "desc" },
       });

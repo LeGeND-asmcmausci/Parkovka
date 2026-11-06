@@ -169,8 +169,45 @@ Authorization: Bearer <refresh_token>
 
 ## Parking Facility Endpoints
 
+All map endpoints are **public** (no JWT) and never expose private user data
+(no names, emails, plate numbers or session ownership).
+
+### Conventions
+
+- **Coordinates:** `latitude` / `longitude` are WGS84 decimal degrees returned as
+  JSON **numbers** (e.g. `41.311081`), never strings. Both `coordinates: { latitude, longitude }`
+  and flat `latitude` / `longitude` are provided for map libraries.
+- **Money:** integer UZS. No floating point.
+- **`openingHours`:** free-form string, e.g. `"24/7"` or `"08:00-22:00"`.
+- **`parkingType`:** `SURFACE | UNDERGROUND | MULTI_LEVEL | STREET`.
+- **Availability** is always computed from real `ParkingSpace` status rows plus live
+  `ParkingSession` / `Reservation` counts. No hardcoded values.
+- Only `ACTIVE` facilities appear in map/list responses.
+
+Availability object (used by several endpoints):
+
+```json
+{
+  "facilityId": "uuid",
+  "totalSpaces": 120,
+  "available": 74,
+  "occupied": 38,
+  "reserved": 6,
+  "maintenance": 2,
+  "reservedHeld": 0,
+  "activeSessions": 38,
+  "activeReservations": 6,
+  "occupancyRate": 36.7,
+  "calculatedAt": "ISO datetime"
+}
+```
+
+`reserved` already includes `reservedHeld`. `occupancyRate` is a percentage with one decimal.
+
+---
+
 ### GET /api/parking
-**Description:** List all active parking facilities
+**Description:** List active facilities with live availability.
 **Authentication:** Public
 **Response (200):**
 ```json
@@ -179,24 +216,90 @@ Authorization: Bearer <refresh_token>
   "data": [
     {
       "id": "uuid",
-      "name": "string",
-      "description": "string (nullable)",
-      "city": "string (default: Tashkent)",
-      "country": "string (default: Uzbekistan)",
-      "hourlyRate": "integer (UZS)",
-      "dailyRate": "integer (UZS)",
-      "status": "enum",
-      "_count": {
-        "floors": number,
-        "spaces": number
-      }
+      "name": "Central Parking",
+      "description": "string | null",
+      "address": "1 Amir Temur Avenue",
+      "city": "Tashkent",
+      "country": "Uzbekistan",
+      "coordinates": { "latitude": 41.311081, "longitude": 69.279737 },
+      "latitude": 41.311081,
+      "longitude": 69.279737,
+      "openingHours": "24/7",
+      "parkingType": "MULTI_LEVEL",
+      "covered": true,
+      "status": "ACTIVE",
+      "pricing": { "hourlyRate": 5000, "dailyRate": 40000, "currency": "UZS" },
+      "currency": "UZS",
+      "timezone": "Asia/Tashkent",
+      "totalSpaces": 120,
+      "floorCount": 3,
+      "spaceCount": 120,
+      "_count": { "floors": 3, "spaces": 120 },
+      "availability": { "available": 74, "occupied": 38, "reserved": 6, "maintenance": 2 }
     }
   ]
 }
 ```
 
+### GET /api/parking/map
+**Description:** City map data. Active facilities with coordinates and live availability.
+**Authentication:** Public
+**Query params (all optional):**
+
+| Param | Type | Rules |
+|---|---|---|
+| `city` | string | case-insensitive match, max 100 chars |
+| `parkingType` | enum | `SURFACE`, `UNDERGROUND`, `MULTI_LEVEL`, `STREET` |
+| `north` | number | -90..90, requires `south` |
+| `south` | number | -90..90, requires `north` |
+| `east` | number | -180..180, requires `west` |
+| `west` | number | -180..180, requires `east` |
+| `limit` | integer | 1..500, default 200 |
+
+**Response (200):**
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "id": "uuid",
+      "name": "Central Parking",
+      "address": "1 Amir Temur Avenue",
+      "city": "Tashkent",
+      "coordinates": { "latitude": 41.311081, "longitude": 69.279737 },
+      "openingHours": "24/7",
+      "parkingType": "MULTI_LEVEL",
+      "pricing": { "hourlyRate": 5000, "dailyRate": 40000, "currency": "UZS" },
+      "availability": {
+        "totalSpaces": 120,
+        "available": 74,
+        "occupied": 38,
+        "reserved": 6,
+        "maintenance": 2,
+        "activeSessions": 38,
+        "activeReservations": 6,
+        "occupancyRate": 36.7
+      }
+    }
+  ],
+  "meta": {
+    "count": 1,
+    "filters": {
+      "city": "Tashkent",
+      "parkingType": null,
+      "bounds": { "north": 41.5, "south": 41.0, "east": 69.5, "west": 69.0 }
+    }
+  }
+}
+```
+
+**Errors:**
+- `400` — invalid coordinate/type/limit, `north < south`, `east < west`, or only one of a bound pair supplied.
+
+**Example:** `GET /api/parking/map?city=Tashkent&north=41.5&south=41.0&east=69.5&west=69.0`
+
 ### GET /api/parking/:id
-**Description:** Get parking facility details with map data
+**Description:** Facility detail with live availability, floor summaries and pricing rules.
 **Authentication:** Public
 **URL Params:** `id` (UUID, required)
 **Response (200):**
@@ -205,58 +308,143 @@ Authorization: Bearer <refresh_token>
   "success": true,
   "data": {
     "id": "uuid",
-    "name": "string",
-    "address": "string",
-    "latitude": "decimal",
-    "longitude": "decimal",
-    "floors": [...],
-    "pricingRules": [...]
+    "name": "Central Parking",
+    "address": "1 Amir Temur Avenue",
+    "coordinates": { "latitude": 41.311081, "longitude": 69.279737 },
+    "openingHours": "24/7",
+    "parkingType": "MULTI_LEVEL",
+    "pricing": { "hourlyRate": 5000, "dailyRate": 40000, "currency": "UZS" },
+    "availability": { "totalSpaces": 120, "available": 74, "occupied": 38, "reserved": 6 },
+    "floors": [
+      {
+        "id": "uuid",
+        "name": "Ground",
+        "floorName": "Ground",
+        "level": 0,
+        "totalSpaces": 40,
+        "status": "ACTIVE",
+        "_count": { "spaces": 40, "zones": 2 }
+      }
+    ],
+    "pricingRules": []
   }
 }
 ```
+**Errors:** `400` invalid UUID, `404` not found.
 
-### GET /api/parking/:id/availability
-**Description:** Get real-time parking space availability
+### GET /api/parking/:id/floors
+**Description:** Indoor map layout — floors, zones and their spaces with live status.
 **Authentication:** Public
-**URL Params:** `id` (UUID, required)
 **Response (200):**
 ```json
 {
   "success": true,
   "data": {
     "facilityId": "uuid",
-    "totalSpaces": number,
-    "available": number,
-    "occupied": number,
-    "reserved": number,
-    "maintenance": number,
-    "spaces": [
+    "facilityName": "Central Parking",
+    "floors": [
       {
         "id": "uuid",
-        "spaceNumber": "string",
-        "spaceType": "enum (regular/disabled/EV/VIP)",
-        "status": "enum",
-        "zone": {
-          "name": "string",
-          "zoneCode": "string"
-        },
-        "floor": {
-          "name": "string",
-          "level": number
-        },
-        "pricePerHour": "integer (UZS)",
-        "pricePerDay": "integer (UZS)"
+        "name": "Ground",
+        "floorName": "Ground",
+        "level": 0,
+        "status": "ACTIVE",
+        "totalSpaces": 40,
+        "availability": { "totalSpaces": 40, "available": 24, "occupied": 12, "reserved": 2, "maintenance": 2 },
+        "zones": [
+          {
+            "id": "uuid",
+            "name": "Zone A",
+            "zoneCode": "A",
+            "zoneType": "regular",
+            "covered": false,
+            "status": "ACTIVE",
+            "totalSpaces": 20,
+            "availability": { "totalSpaces": 20, "available": 12, "occupied": 7, "reserved": 1, "maintenance": 0 },
+            "spaces": [
+              {
+                "id": "uuid",
+                "spaceNumber": "A-1",
+                "spaceType": "regular",
+                "status": "AVAILABLE",
+                "pricePerHour": 5000,
+                "pricePerDay": 40000
+              }
+            ]
+          }
+        ],
+        "unzonedSpaces": [
+          { "id": "uuid", "spaceNumber": "G-1", "spaceType": "regular", "status": "AVAILABLE" }
+        ]
+      }
+    ],
+    "availability": { "totalSpaces": 120, "available": 74, "occupied": 38, "reserved": 6 }
+  }
+}
+```
+
+`space.status` is `AVAILABLE | RESERVED | OCCUPIED | MAINTENANCE | RESERVED_HELD`.
+`unzonedSpaces` lists spaces with no zone (ground-level/legacy rows).
+
+### GET /api/parking/:id/spaces
+**Description:** Flat, paginated space list with filters.
+**Authentication:** Public
+**Query params:** `status`, `floorId` (UUID), `zoneId` (UUID), `spaceType`, `page` (>=1, default 1), `limit` (1..500, default 100)
+**Response (200):**
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "id": "uuid",
+      "spaceNumber": "A-1",
+      "spaceType": "regular",
+      "status": "AVAILABLE",
+      "level": 0,
+      "zoneName": "A",
+      "pricePerHour": 5000,
+      "pricePerDay": 40000,
+      "maxStayDuration": 0,
+      "floorId": "uuid",
+      "zoneId": "uuid",
+      "floor": { "id": "uuid", "name": "Ground", "floorName": "Ground", "level": 0 },
+      "zone": { "id": "uuid", "name": "Zone A", "zoneCode": "A", "zoneType": "regular" }
+    }
+  ],
+  "meta": { "facilityId": "uuid", "page": 1, "limit": 100, "total": 120, "totalPages": 2 }
+}
+```
+
+### GET /api/parking/:id/availability
+**Description:** Availability snapshot plus every space of the facility.
+**Authentication:** Public
+**Response (200):** the availability object (above) merged with `spaces[]`
+(`id`, `spaceNumber`, `spaceType`, `status`, `pricePerHour`, `pricePerDay`, `zone`, `floor`).
+
+### GET /api/parking/:id/map
+**Description:** Indoor layout by zone (compatibility endpoint used by older clients).
+**Authentication:** Public
+**Response (200):**
+```json
+{
+  "success": true,
+  "data": {
+    "facility": { "id": "uuid", "name": "Central Parking", "coordinates": { "latitude": 41.311081, "longitude": 69.279737 }, "availability": {} },
+    "zones": [
+      {
+        "id": "uuid",
+        "name": "Zone A",
+        "zoneCode": "A",
+        "zoneType": "regular",
+        "floor": { "id": "uuid", "name": "Ground", "level": 0 },
+        "totalSpaces": 20,
+        "availability": { "totalSpaces": 20, "available": 12, "occupied": 7, "reserved": 1, "maintenance": 0 },
+        "spaces": [{ "id": "uuid", "spaceNumber": "A-1", "spaceType": "regular", "status": "AVAILABLE" }]
       }
     ]
   }
 }
 ```
-
-### GET /api/parking/:id/map
-**Description:** Get parking facility map/layout data
-**Authentication:** Public
-**URL Params:** `id` (UUID, required)
-**Response (200):** Facility map with zone layout
 
 ---
 
@@ -518,89 +706,82 @@ Authorization: Bearer <refresh_token>
 
 ## Socket.IO Events
 
-### Events (client -> server)
+### Connection and authentication
 
-#### `parking.space.updated`
-Emitted when a parking space status changes.
+```js
+import { io } from "socket.io-client";
+
+const socket = io(API_ORIGIN, {
+  auth: { token: accessToken }, // optional
+  transports: ["websocket"],
+});
+```
+
+- The server verifies the JWT from `auth.token` or an `Authorization: Bearer <token>` header.
+- **Anonymous connections are allowed read-only** because map data is public.
+- An invalid or expired token fails the handshake (`connect_error`).
+- Authenticated sockets also join `user:{userId}` (and `staff` for GUARD/ADMIN).
+- Every socket automatically joins the public `map` room.
+
+**Clients cannot publish state changes.** Availability events are emitted by the server
+only after a database transaction commits, so clients cannot forge or duplicate them.
+There are no client -> server events other than room subscription.
+
+### Client -> server
+
+#### `join:facility` / `leave:facility`
+Payload: facility UUID as a bare string.
+```js
+socket.emit("join:facility", "facility-uuid");
+```
+Invalid IDs are ignored; `join:facility` replies with an `error` event.
+
+### Server -> client
+
+#### `parking:availability`
+Full availability snapshot, emitted after reservation create/cancel, guard check-in and check-out.
+```json
+{
+  "facilityId": "uuid",
+  "totalSpaces": 120,
+  "available": 74,
+  "occupied": 38,
+  "reserved": 6,
+  "maintenance": 2,
+  "reservedHeld": 0,
+  "activeSessions": 38,
+  "activeReservations": 6,
+  "occupancyRate": 36.7,
+  "calculatedAt": "ISO datetime",
+  "timestamp": "ISO datetime"
+}
+```
+
+#### `parking:space_updated`
+Single space status change, emitted alongside `parking:availability`.
 ```json
 {
   "facilityId": "uuid",
   "spaceId": "uuid",
-  "status": "AVAILABLE|OCCUPIED|RESERVED|MAINTENANCE"
+  "spaceNumber": "A-1",
+  "status": "OCCUPIED",
+  "previousStatus": "AVAILABLE",
+  "floorId": "uuid",
+  "zoneId": "uuid | null",
+  "reason": "CHECK_IN",
+  "timestamp": "ISO datetime"
 }
 ```
 
-#### `parking.availability.updated`
-Emitted when availability changes for a facility.
-```json
-{
-  "facilityId": "uuid",
-  "available": number,
-  "occupied": number,
-  "reserved": number
-}
-```
+`reason` is one of `RESERVATION_CREATED`, `RESERVATION_CANCELLED`, `CHECK_IN`, `CHECK_OUT`, `STATUS_CHANGED`.
 
-#### `reservation.created`
-Emitted when a new reservation is created.
-```json
-{
-  "reservationId": "uuid",
-  "facilityId": "uuid"
-}
-```
-
-#### `reservation.cancelled`
-Emitted when a reservation is cancelled.
-```json
-{
-  "reservationId": "uuid",
-  "facilityId": "uuid"
-}
-```
-
-#### `session.started`
-Emitted when a parking session starts (walk-in).
-```json
-{
-  "sessionId": "uuid",
-  "facilityId": "uuid"
-}
-```
-
-#### `session.completed`
-Emitted when a parking session ends.
-```json
-{
-  "sessionId": "uuid",
-  "facilityId": "uuid"
-}
-```
-
-#### `payment.completed`
-Emitted when a payment is completed.
-```json
-{
-  "paymentId": "uuid",
-  "facilityId": "uuid"
-}
-```
-
-#### `notification.created`
-Emitted when a new notification is created for a user.
-```json
-{
-  "userId": "uuid",
-  "title": "string",
-  "message": "string"
-}
-```
+A socket in both the `map` room and `facility:{id}` room receives each event exactly once.
 
 ### Rooms
-- `user:{userId}` - User-specific room
-- `facility:{facilityId}` - Facility-specific room
-- `guard:all` - General guard room
-- `user:availability` - General availability room
+- `map` — every connection (public map listeners)
+- `facility:{facilityId}` — joined explicitly via `join:facility`
+- `user:{userId}` — authenticated user
+- `staff` — GUARD/ADMIN connections
 
 ---
 
