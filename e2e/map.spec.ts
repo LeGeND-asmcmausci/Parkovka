@@ -49,6 +49,29 @@ test.describe('parking map', () => {
     await expect(page).toHaveURL(/\/map$/);
     await expect(page.locator('aside h2')).toHaveCount(0);
   });
+
+  test('opens Street View, reports a clear message and returns to the same map state', async ({
+    page,
+  }) => {
+    await openMap(page, '/map?facility=markaziy');
+    await expect(page.locator('.leaflet-marker-icon')).toHaveCount(6);
+    const mapPaneBefore = await page.locator('.leaflet-map-pane').getAttribute('style');
+
+    await page.route('https://maps.googleapis.com/**', (route) => route.abort());
+    await page.getByRole('button', { name: 'Street View' }).click();
+
+    const panel = page.getByRole('region', { name: '360° ko‘cha panoramasi' });
+    await expect(panel).toBeVisible();
+    await expect(panel.getByRole('alert')).toBeVisible();
+
+    await panel.getByRole('button', { name: 'Xaritaga qaytish' }).click();
+    await expect(panel).toHaveCount(0);
+    await expect(page.locator('.leaflet-marker-icon')).toHaveCount(6);
+    await expect(page.locator('.leaflet-map-pane')).toHaveAttribute(
+      'style',
+      mapPaneBefore ?? '',
+    );
+  });
 });
 
 test.describe('parking map geolocation', () => {

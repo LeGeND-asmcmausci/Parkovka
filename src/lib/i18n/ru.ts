@@ -862,6 +862,14 @@ export const ru = {
   'map.totalFree': 'Свободные места',
   'map.controls': 'Поиск и фильтры',
   'map.closeSheet': 'Закрыть',
+  'map.streetView': 'Street View',
+  'map.streetViewTitle': 'Панорама улицы 360°',
+  'map.streetViewLoading': 'Загрузка панорамы…',
+  'map.streetViewUnavailable': 'Для этой парковки нет панорамы Google Street View.',
+  'map.streetViewMissingKey':
+    'Ключ Google Maps API не настроен. Добавьте VITE_GOOGLE_MAPS_API_KEY в файл .env.',
+  'map.streetViewError': 'Не удалось загрузить панораму. Проверьте подключение к интернету.',
+  'map.backToMap': 'Вернуться к карте',
 
   'footer.about': 'Parkovka',
   'footer.aboutText':

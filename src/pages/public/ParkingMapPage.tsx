@@ -1,5 +1,6 @@
 import {
   ArrowRight,
+  Camera,
   ExternalLink,
   Layers,
   LocateFixed,
@@ -38,6 +39,7 @@ import {
 import { FacilityImage } from '@/components/facilities/FacilityImage';
 import { IndoorParkingMap } from '@/components/map/IndoorParkingMap';
 import { ParkingCityMap } from '@/components/map/ParkingCityMap';
+import { StreetViewPanel } from '@/components/map/StreetViewPanel';
 import { Badge, type BadgeTone } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { CheckboxField } from '@/components/ui/controls';
@@ -85,11 +87,13 @@ function FacilityDetailPanel({
   distance,
   userLocation,
   onClose,
+  onStreetView,
 }: {
   facility: FacilityWithAvailability;
   distance?: number;
   userLocation: Coordinates | null;
   onClose: () => void;
+  onStreetView: (facility: FacilityWithAvailability) => void;
 }) {
   const { t, tx, language } = useI18n();
   const { user } = useAuth();
@@ -196,6 +200,18 @@ function FacilityDetailPanel({
           )}
         </div>
 
+        <Button
+          variant="secondary"
+          size="sm"
+          className="w-full"
+          leftIcon={<Camera />}
+          disabled={!hasCoordinates(facility)}
+          title={!hasCoordinates(facility) ? t('map.noCoordinates') : undefined}
+          onClick={() => onStreetView(facility)}
+        >
+          {t('map.streetView')}
+        </Button>
+
         {isPrivileged ? (
           <div className="rounded-lg border border-border bg-muted/40 px-3 py-2">
             <Badge tone="info" size="sm">
@@ -255,6 +271,9 @@ export function ParkingMapPage() {
   const [geoError, setGeoError] = useState('');
   const [mobilePanelOpen, setMobilePanelOpen] = useState(false);
   const [fitSignal, setFitSignal] = useState(0);
+  const [streetViewFacility, setStreetViewFacility] = useState<FacilityWithAvailability | null>(
+    null,
+  );
 
   usePageTitle(t('map.title'));
 
@@ -331,6 +350,7 @@ export function ParkingMapPage() {
   const selectFacility = (facility: FacilityWithAvailability) => {
     setSelectedId(facility.id);
     setMobilePanelOpen(false);
+    setStreetViewFacility(null);
     const next = new URLSearchParams(params);
     next.set('facility', facility.slug);
     setParams(next, { replace: true });
@@ -338,9 +358,15 @@ export function ParkingMapPage() {
 
   const closeDetails = () => {
     setSelectedId(null);
+    setStreetViewFacility(null);
     const next = new URLSearchParams(params);
     next.delete('facility');
     setParams(next, { replace: true });
+  };
+
+  const openStreetView = (facility: FacilityWithAvailability) => {
+    setStreetViewFacility(facility);
+    setMobilePanelOpen(false);
   };
 
   const resetFilters = () => {
@@ -582,7 +608,7 @@ export function ParkingMapPage() {
             <aside
               className={cn(
                 'z-30 bg-card',
-                selected
+                selected && !streetViewFacility
                   ? 'fixed inset-x-0 bottom-0 max-h-[82dvh] overflow-y-auto overscroll-contain rounded-t-2xl border-t border-border shadow-pop lg:static lg:max-h-[calc(100dvh-12rem)] lg:rounded-xl lg:border lg:shadow-sm'
                   : 'hidden lg:block lg:max-h-[calc(100dvh-12rem)] lg:overflow-y-auto lg:rounded-xl lg:border lg:border-border lg:shadow-sm',
               )}
@@ -605,6 +631,7 @@ export function ParkingMapPage() {
                   distance={distances.get(selected.id)}
                   userLocation={userLocation}
                   onClose={closeDetails}
+                  onStreetView={openStreetView}
                 />
               )}
 
@@ -684,6 +711,14 @@ export function ParkingMapPage() {
                   </Badge>
                 )}
               </div>
+
+              {streetViewFacility && (
+                <StreetViewPanel
+                  className="absolute inset-0 z-[900]"
+                  facility={streetViewFacility}
+                  onClose={() => setStreetViewFacility(null)}
+                />
+              )}
             </div>
           </div>
         )}

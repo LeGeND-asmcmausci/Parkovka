@@ -862,6 +862,14 @@ export const en = {
   'map.totalFree': 'Available spaces',
   'map.controls': 'Search and filters',
   'map.closeSheet': 'Close',
+  'map.streetView': 'Street View',
+  'map.streetViewTitle': '360° street panorama',
+  'map.streetViewLoading': 'Loading panorama…',
+  'map.streetViewUnavailable': 'Google Street View is not available for this parking location.',
+  'map.streetViewMissingKey':
+    'Google Maps API key is not configured. Add VITE_GOOGLE_MAPS_API_KEY to the .env file.',
+  'map.streetViewError': 'Could not load the panorama. Check your internet connection.',
+  'map.backToMap': 'Back to map',
 
   'footer.about': 'Parkovka',
   'footer.aboutText':

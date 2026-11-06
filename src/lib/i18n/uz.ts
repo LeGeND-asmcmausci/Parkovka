@@ -860,6 +860,14 @@ export const uz = {
   'map.totalFree': 'Bo‘sh joylar',
   'map.controls': 'Qidiruv va filtrlar',
   'map.closeSheet': 'Yopish',
+  'map.streetView': 'Street View',
+  'map.streetViewTitle': '360° ko‘cha panoramasi',
+  'map.streetViewLoading': 'Panorama yuklanmoqda…',
+  'map.streetViewUnavailable': 'Bu parking uchun Google Street View panoramasi mavjud emas.',
+  'map.streetViewMissingKey':
+    'Google Maps API kaliti sozlanmagan. VITE_GOOGLE_MAPS_API_KEY ni .env fayliga qo‘shing.',
+  'map.streetViewError': 'Panoramani yuklashda xatolik yuz berdi. Internet aloqasini tekshiring.',
+  'map.backToMap': 'Xaritaga qaytish',
 
   'footer.about': 'Parkovka',
   'footer.aboutText':
